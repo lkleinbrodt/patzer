@@ -19,6 +19,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 import json
 import os
 import time
+from pathlib import Path
 import math
 import pickle
 from contextlib import nullcontext
@@ -75,7 +76,7 @@ dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) # overrides from command line or config file
+exec(open(Path(__file__).parent / 'configurator.py').read())
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 
 if device == 'auto':

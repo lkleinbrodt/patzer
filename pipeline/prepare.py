@@ -1,4 +1,6 @@
 """
+TODO: accept multiple games files (when we scrape we will have one file for each month)
+
 pipeline/prepare.py
 
 One-time preprocessing step: tokenize games.txt into binary files that
@@ -28,7 +30,7 @@ import numpy as np
 
 # Allow imports from project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from chess.tokenizer import ChessTokenizer
+from patzer.tokenizer import ChessTokenizer
 
 
 def parse_args():
