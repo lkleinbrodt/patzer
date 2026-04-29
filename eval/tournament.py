@@ -70,57 +70,78 @@ def play_game(white, black, max_moves: int = 300) -> str:
     return "1/2-1/2"
 
 
+def _play_match(patzer, sf, n_games, label) -> tuple[int, int, int]:
+    """Play n_games against sf (alternating colors). Returns (W, L, D) from patzer's perspective."""
+    w = l = d = 0
+    for game_idx in range(n_games):
+        patzer_is_white = game_idx % 2 == 0
+        white = patzer if patzer_is_white else sf
+        black = sf if patzer_is_white else patzer
+
+        result = play_game(white, black)
+        color = "W" if patzer_is_white else "B"
+        print(f"  {label} [{game_idx+1}/{n_games}] Patzer={color} → {result}")
+
+        if patzer_is_white:
+            if result == "1-0":
+                w += 1
+            elif result == "0-1":
+                l += 1
+            else:
+                d += 1
+        else:
+            if result == "0-1":
+                w += 1
+            elif result == "1-0":
+                l += 1
+            else:
+                d += 1
+    return w, l, d
+
+
 def run_tournament(
     patzer: "Patzer",
     checkpoint_path: str,
     stockfish_binary: str,
     depths: list[int],
     n_games: int,
+    elo_limits: list[int] | None = None,
 ) -> list[dict]:
-    """Play n_games per depth (alternating colors). Returns list of result records."""
+    """Play n_games per depth/elo (alternating colors). Returns list of result records."""
     records = []
 
     for depth in depths:
-        sf = StockfishPlayer(stockfish_binary, depth)
-        w = l = d = 0
-
-        for game_idx in range(n_games):
-            patzer_is_white = game_idx % 2 == 0
-            white = patzer if patzer_is_white else sf
-            black = sf if patzer_is_white else patzer
-
-            result = play_game(white, black)
-            color = "W" if patzer_is_white else "B"
-            print(f"  depth={depth} [{game_idx+1}/{n_games}] Patzer={color} → {result}")
-
-            if patzer_is_white:
-                if result == "1-0":
-                    w += 1
-                elif result == "0-1":
-                    l += 1
-                else:
-                    d += 1
-            else:
-                if result == "0-1":
-                    w += 1
-                elif result == "1-0":
-                    l += 1
-                else:
-                    d += 1
-
+        sf = StockfishPlayer(stockfish_binary, depth=depth)
+        w, l, d = _play_match(patzer, sf, n_games, f"depth={depth}")
         sf.close()
         records.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "checkpoint": checkpoint_path,
             "iter_num": patzer.iter_num,
             "stockfish_depth": depth,
+            "stockfish_elo": None,
             "games": n_games,
             "temperature": patzer.temperature,
             "top_k": patzer.top_k,
             "conditioning": patzer.conditioning,
-            "W": w,
-            "L": l,
-            "D": d,
+            "W": w, "L": l, "D": d,
+        })
+
+    for elo in (elo_limits or []):
+        sf = StockfishPlayer(stockfish_binary, elo_limit=elo)
+        w, l, d = _play_match(patzer, sf, n_games, f"elo={elo}")
+        sf.close()
+        records.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "checkpoint": checkpoint_path,
+            "iter_num": patzer.iter_num,
+            "stockfish_depth": None,
+            "stockfish_elo": elo,
+            "games": n_games,
+            "temperature": patzer.temperature,
+            "top_k": patzer.top_k,
+            "conditioning": patzer.conditioning,
+            "W": w, "L": l, "D": d,
         })
 
     return records
@@ -151,7 +172,8 @@ def aggregate_results(records: list[dict]) -> list[dict]:
     for r in records:
         key = (
             r["checkpoint"],
-            r["stockfish_depth"],
+            r.get("stockfish_depth"),
+            r.get("stockfish_elo"),
             r.get("conditioning", ""),
             r.get("temperature", 1.0),
             r.get("top_k"),
@@ -163,11 +185,12 @@ def aggregate_results(records: list[dict]) -> list[dict]:
 
     rows = []
     for key, counts in agg.items():
-        ckpt, depth, cond, temp, top_k = key
+        ckpt, depth, elo, cond, temp, top_k = key
         rows.append({
             "checkpoint": ckpt,
             "iter_num": meta[key]["iter_num"],
             "stockfish_depth": depth,
+            "stockfish_elo": elo,
             "conditioning": cond,
             "temperature": temp,
             "top_k": top_k,
@@ -185,14 +208,18 @@ def show_results():
         return
 
     rows = aggregate_results(records)
-    print(f"\n{'Checkpoint':<40} {'Iter':>6} {'Depth':>5} {'Cond':<12} {'T':>4} {'N':>5} {'W':>4} {'L':>4} {'D':>4} {'Score':>7}")
-    print("-" * 107)
+    print(f"\n{'Checkpoint':<40} {'Iter':>6} {'Opponent':<12} {'Cond':<12} {'T':>4} {'N':>5} {'W':>4} {'L':>4} {'D':>4} {'Score':>7}")
+    print("-" * 113)
     for r in rows:
         ckpt = Path(r["checkpoint"]).name
         total = r["W"] + r["L"] + r["D"]
         score = (r["W"] + 0.5 * r["D"]) / total * 100 if total else 0
+        if r.get("stockfish_elo") is not None:
+            opponent = f"elo{r['stockfish_elo']}"
+        else:
+            opponent = f"d{r['stockfish_depth']}"
         print(
-            f"{ckpt:<40} {r.get('iter_num', '?'):>6} {r['stockfish_depth']:>5} "
+            f"{ckpt:<40} {r.get('iter_num', '?'):>6} {opponent:<12} "
             f"{r['conditioning']:<12} {r['temperature']:>4.1f} "
             f"{total:>5} {r['W']:>4} {r['L']:>4} {r['D']:>4} {score:>6.1f}%"
         )
@@ -203,9 +230,11 @@ def main():
     parser.add_argument("--checkpoint", help="Path to checkpoint (local or R2 key)")
     parser.add_argument("--pull-r2", action="store_true", help="Download checkpoint from R2 first")
     parser.add_argument("--depths", nargs="+", type=int, default=[1, 3, 5])
+    parser.add_argument("--stockfish-elo", nargs="+", type=int, default=None,
+                        help="ELO-limited Stockfish targets (e.g. --stockfish-elo 1200 1500)")
     parser.add_argument("--games", type=int, default=20, help="Games per depth (alternates colors)")
     parser.add_argument("--stockfish", default="/opt/homebrew/bin/stockfish")
-    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--device", default="cpu", help="torch device: cpu | mps | cuda")
     parser.add_argument(
@@ -265,7 +294,8 @@ def main():
         conditioning=args.conditioning,
     )
 
-    records = run_tournament(patzer, args.checkpoint, args.stockfish, args.depths, args.games)
+    records = run_tournament(patzer, args.checkpoint, args.stockfish, args.depths, args.games,
+                             elo_limits=args.stockfish_elo)
     save_results(records)
     show_results()
 

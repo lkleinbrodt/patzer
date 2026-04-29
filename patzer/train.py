@@ -41,6 +41,7 @@ log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
+r2_history_ckpt_interval = 5000 # push ckpt_{iter}.pt to R2 every N steps (ckpt.pt is still pushed each eval)
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = False # disabled by default
@@ -319,8 +320,9 @@ while True:
                 ckpt_local = os.path.join(out_dir, 'ckpt.pt')
                 torch.save(checkpoint, ckpt_local)
                 r2.push_file(ckpt_local)
-                # also push a stamped copy so R2 preserves history across evals
-                r2.push_file(ckpt_local, f"{out_dir}/ckpt_{iter_num:06d}.pt")
+                # optionally push a stamped copy so R2 preserves some history across evals
+                if r2_history_ckpt_interval and (iter_num % r2_history_ckpt_interval == 0):
+                    r2.push_file(ckpt_local, f"{out_dir}/ckpt_{iter_num:06d}.pt")
     if iter_num == 0 and eval_only:
         break
 

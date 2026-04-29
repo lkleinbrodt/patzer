@@ -7,7 +7,7 @@ using the model's probability distribution with legal-move masking.
 
 import random
 import sys
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path
 
 import chess
@@ -33,7 +33,7 @@ class Patzer:
         self,
         checkpoint_path: str | Path,
         device: str = "cpu",
-        temperature: float = 1.0,
+        temperature: float = 0.1,
         top_k: int | None = None,
         conditioning: str = "match_color",
     ):
@@ -59,7 +59,10 @@ class Patzer:
     def _load_model(self, path: Path) -> tuple[GPT, int]:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         config = GPTConfig(**checkpoint["model_args"])
-        model = GPT(config)
+        # IMPORTANT: keep stdout clean for UCI protocol users of this class.
+        # `GPT.__init__` prints parameter counts; route that to stderr.
+        with redirect_stdout(sys.stderr):
+            model = GPT(config)
         state = checkpoint["model"]
         state = {
             (k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v
@@ -69,7 +72,10 @@ class Patzer:
         model.eval()
         model.to(self.device)
         iter_num = checkpoint.get("iter_num", 0)
-        print(f"[patzer] loaded {path.name}  (iter {iter_num}, conditioning={self.conditioning})")
+        print(
+            f"[patzer] loaded {path.name}  (iter {iter_num}, conditioning={self.conditioning})",
+            file=sys.stderr,
+        )
         return model, iter_num
 
     @property
@@ -124,30 +130,40 @@ class Patzer:
             v, _ = torch.topk(logits, min(self.top_k, len(legal_ids)))
             logits[logits < v[-1]] = float("-inf")
 
-        logits = logits / self.temperature
-        probs = F.softmax(logits, dim=-1)
+        if self.temperature == 0:
+            chosen_id = torch.argmax(logits).item()
+        else:
+            logits = logits / self.temperature
+            probs = F.softmax(logits, dim=-1)
 
-        if torch.isnan(probs).any() or probs.sum() < 1e-6:
-            self.illegal_move_count += 1
-            return random.choice(legal_moves)
+            if torch.isnan(probs).any() or probs.sum() < 1e-6:
+                self.illegal_move_count += 1
+                return random.choice(legal_moves)
 
-        chosen_id = torch.multinomial(probs, num_samples=1).item()
+            chosen_id = torch.multinomial(probs, num_samples=1).item()
         return self.tokenizer.decode(chosen_id)
 
 
 class StockfishPlayer:
-    def __init__(self, binary_path: str, depth: int):
+    def __init__(self, binary_path: str, depth: int | None = None, elo_limit: int | None = None):
         import chess.engine
+        assert depth is not None or elo_limit is not None, "Provide depth or elo_limit"
         self.depth = depth
+        self.elo_limit = elo_limit
         self.engine = chess.engine.SimpleEngine.popen_uci(binary_path)
+        if elo_limit is not None:
+            self.engine.configure({"UCI_LimitStrength": True, "UCI_Elo": elo_limit})
 
     @property
     def name(self) -> str:
+        if self.elo_limit is not None:
+            return f"Stockfish(elo{self.elo_limit})"
         return f"Stockfish(d{self.depth})"
 
     def get_move(self, board: chess.Board, move_history: list[str]) -> str:
         import chess.engine
-        result = self.engine.play(board, chess.engine.Limit(depth=self.depth))
+        limit = chess.engine.Limit(depth=self.depth) if self.elo_limit is None else chess.engine.Limit(time=0.1)
+        result = self.engine.play(board, limit)
         return result.move.uci()
 
     def close(self):

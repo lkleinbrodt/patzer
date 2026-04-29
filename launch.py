@@ -52,6 +52,10 @@ def vast(*args, raw=True):
     return json.loads(r.stdout) if raw else r.stdout.strip()
 
 
+def _ntfy_topic() -> str | None:
+    return os.environ.get("NTFY_TOPIC")
+
+
 def r2_env_flags() -> str:
     keys = ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET",
             "R2_ENDPOINT_URL", "R2_ACCOUNT_ID"]
@@ -65,6 +69,9 @@ def r2_env_flags() -> str:
     wb = _wandb_api_key()
     if wb:
         pairs["WANDB_API_KEY"] = wb
+    ntfy = _ntfy_topic()
+    if ntfy:
+        pairs["NTFY_TOPIC"] = ntfy
     return " ".join(f"-e {k}={v}" for k, v in pairs.items())
 
 
@@ -79,6 +86,9 @@ def r2_export_lines() -> str:
     wb = _wandb_api_key()
     if wb:
         lines.append(f"export WANDB_API_KEY='{wb}'")
+    ntfy = _ntfy_topic()
+    if ntfy:
+        lines.append(f"export NTFY_TOPIC='{ntfy}'")
     return "\n".join(lines)
 
 
@@ -93,6 +103,17 @@ def build_script(config: str, resume: bool, wipe: bool = False, terminate_on_err
     # Vast.ai injects $CONTAINER_ID inside the container — that's the instance ID.
     # We install vastai so the script can self-destruct when done.
     kill_on_error = "1" if terminate_on_error else "0"
+    notify_fn = """\
+_notify() {
+    local title="$1" msg="$2" priority="${3:-default}"
+    [ -n "${NTFY_TOPIC:-}" ] || return 0
+    curl -s -X POST \
+        -H "Title: $title" \
+        -H "Priority: $priority" \
+        -H "Tags: chess,robot" \
+        -d "$msg" \
+        "https://ntfy.sh/${NTFY_TOPIC}" || true
+}"""
     trap = f"""\
 _on_exit() {{
     EXIT_CODE=$?
@@ -103,9 +124,28 @@ import r2
 r2.push_file('/workspace/train.log', 'logs/train_${{CONTAINER_ID:-unknown}}.log')
 print('[r2] log pushed')
 " || echo "[warn] log push to R2 failed"
+    if [ $EXIT_CODE -eq 0 ]; then
+        _notify "Patzer: training complete" "Instance ${{CONTAINER_ID:-unknown}} is being destroyed. Check W&B for results." "default"
+    elif [ {kill_on_error} -eq 1 ]; then
+        _notify "Patzer: training FAILED — instance destroyed" "Exit code $EXIT_CODE. Instance ${{CONTAINER_ID:-unknown}} destroyed." "high"
+    else
+        _notify "Patzer: training FAILED — instance ALIVE" "Exit code $EXIT_CODE. Instance ${{CONTAINER_ID:-unknown}} still running and costing money!" "urgent"
+    fi
     if [ $EXIT_CODE -eq 0 ] || [ {kill_on_error} -eq 1 ]; then
+        if [ -z "${{CONTAINER_ID:-}}" ]; then
+            echo "[warn] CONTAINER_ID not set; cannot auto-destroy instance"
+            return 0
+        fi
         echo "Destroying instance ${{CONTAINER_ID}}..."
-        vastai --api-key "$VAST_API_KEY" destroy instance "$CONTAINER_ID" || true
+        # vastai 0.3.x prompts for confirmation; pipe 'y' so this works non-interactively.
+        printf "y\n" | vastai --api-key "$VAST_API_KEY" destroy instance "$CONTAINER_ID" || true
+        # Best-effort verification: after destroy, show should fail.
+        sleep 2
+        if vastai --api-key "$VAST_API_KEY" show instance "$CONTAINER_ID" >/dev/null 2>&1; then
+            echo "[warn] destroy command returned but instance still appears to exist: $CONTAINER_ID"
+        else
+            echo "[vast] instance destroyed: $CONTAINER_ID"
+        fi
     else
         echo "Training failed — instance kept alive for debugging (id=${{CONTAINER_ID}})"
         echo "SSH in to inspect, then: vastai destroy instance ${{CONTAINER_ID}}"
@@ -125,9 +165,11 @@ trap _on_exit EXIT"""
         f"cd {WORKSPACE}",
         "pip install -q -r requirements.txt",
         "pip install -q vastai",
+        notify_fn,
         trap,
         "cd patzer",
         pull_ckpt,
+        f'_notify "Patzer: training started" "Config: {config}  Instance: ${{CONTAINER_ID:-unknown}}" "default"',
         f"python -u train.py config/{config}.py {resume_flag} 2>&1 | tee /workspace/train.log".strip(),
     ]))
 
@@ -159,6 +201,38 @@ def ssh_prefix(info: dict) -> list[str]:
     port = info.get("ssh_port", 22)
     return ["ssh", "-p", str(port), "-o", "StrictHostKeyChecking=no",
             "-o", "ConnectTimeout=15", f"root@{host}"]
+
+
+def show_status(instance_id: int):
+    print(f"Fetching status for instance {instance_id}...")
+    try:
+        info = vast("show", "instance", str(instance_id))
+    except RuntimeError as e:
+        print(f"Could not fetch instance: {e}")
+        return
+
+    status = info.get("actual_status", "unknown")
+    gpu = info.get("gpu_name", "?")
+    cost = info.get("dph_total", 0)
+    host = info.get("ssh_host") or info.get("public_ipaddr", "")
+    port = info.get("ssh_port", 22)
+
+    print(f"\n  Instance:  {instance_id}")
+    print(f"  Status:    {status}")
+    print(f"  GPU:       {gpu}")
+    print(f"  Cost:      ${cost:.3f}/hr")
+    if host:
+        print(f"  SSH:       ssh -p {port} root@{host}")
+
+    if status != "running" or not host:
+        return
+
+    print(f"\n--- Last 30 lines of /workspace/train.log ---")
+    result = subprocess.run(
+        ssh_prefix(info) + ["tail -n 30 /workspace/train.log 2>/dev/null || echo '(log not found)'"],
+        capture_output=True, text=True,
+    )
+    print(result.stdout or result.stderr or "(no output)")
 
 
 def run_on_instance(instance_id: int, config: str, resume: bool, terminate_on_error: bool = False):
@@ -218,6 +292,8 @@ def main():
                         help="Run on an existing instance instead of renting a new one")
     parser.add_argument("--list", action="store_true",
                         help="List your running instances and exit")
+    parser.add_argument("--status", type=int, metavar="ID",
+                        help="Show status and recent log for a running instance")
     parser.add_argument("--disk", type=int, default=40,
                         help="Disk size in GB for new instances (default: 40)")
     parser.add_argument("--min-gpu-ram", type=int, default=8,
@@ -236,6 +312,10 @@ def main():
 
     if args.list:
         list_instances()
+        return
+
+    if args.status:
+        show_status(args.status)
         return
 
     if args.instance:

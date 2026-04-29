@@ -1,4 +1,5 @@
-chess
+python-chess
 boto3
 python-dotenv
 wandb
+pygame

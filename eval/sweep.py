@@ -76,12 +76,13 @@ def discover_checkpoints(r2_prefix: str) -> list[dict]:
 
 # ── Already-evaluated lookup ───────────────────────────────────────────────────
 
-def already_evaluated(r2_key: str, depth: int, conditioning: str) -> bool:
+def already_evaluated(r2_key: str, depth: int | None, conditioning: str, elo: int | None = None) -> bool:
     from eval.tournament import load_results
     for r in load_results():
         if (
             r.get("checkpoint") == r2_key
             and r.get("stockfish_depth") == depth
+            and r.get("stockfish_elo") == elo
             and r.get("conditioning") == conditioning
         ):
             return True
@@ -109,7 +110,7 @@ def run_sweep(args):
         r2_key = entry["r2_key"]
         local_path = Path(r2_key)
 
-        # Per-depth skip check
+        # Per-depth / per-elo skip check
         depths_to_run = []
         for depth in args.depths:
             if args.skip_existing and already_evaluated(r2_key, depth, args.conditioning):
@@ -117,7 +118,14 @@ def run_sweep(args):
             else:
                 depths_to_run.append(depth)
 
-        if not depths_to_run:
+        elos_to_run = []
+        for elo in (args.stockfish_elo or []):
+            if args.skip_existing and already_evaluated(r2_key, None, args.conditioning, elo=elo):
+                print(f"  [skip] {entry['filename']} elo={elo} already in results.json")
+            else:
+                elos_to_run.append(elo)
+
+        if not depths_to_run and not elos_to_run:
             continue
 
         # Pull from R2 if not local
@@ -146,6 +154,7 @@ def run_sweep(args):
                 args.stockfish,
                 depths_to_run,
                 args.games,
+                elo_limits=elos_to_run,
             )
             save_results(records)
         finally:
@@ -231,10 +240,12 @@ def main():
                         help="R2 prefix to search for checkpoints")
     parser.add_argument("--depths", nargs="+", type=int, default=[1, 3],
                         help="Stockfish depths to evaluate against")
+    parser.add_argument("--stockfish-elo", nargs="+", type=int, default=None,
+                        help="ELO-limited Stockfish targets (e.g. --stockfish-elo 1200 1500)")
     parser.add_argument("--games", type=int, default=20,
                         help="Games per checkpoint per depth")
     parser.add_argument("--stockfish", default="/opt/homebrew/bin/stockfish")
-    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--device", default="cpu", help="cpu | mps | cuda")
     parser.add_argument("--conditioning", default="match_color",
