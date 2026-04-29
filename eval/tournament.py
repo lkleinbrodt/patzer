@@ -1,14 +1,22 @@
 """
 eval/tournament.py
 
-Play Patzer (our trained model) against Stockfish at various fixed depths.
+Play Patzer (our trained model) against Stockfish at ELO-limited settings
+(recommended) or fixed depths (legacy).
 Results are persisted to eval/results.json so experiments accumulate over time.
 
 Usage:
-    # Run a tournament (pulls checkpoint from R2 if needed):
+    # Run a smart ELO tournament (recommended):
+    python eval/tournament.py \
+        --checkpoint checkpoints/patzer_v0/ckpt.pt \
+        --smart-elo \
+        --games 12 \
+        --stockfish /opt/homebrew/bin/stockfish
+
+    # Run a fixed ELO ladder:
     python eval/tournament.py \\
         --checkpoint checkpoints/patzer_v0/ckpt.pt \\
-        --depths 1 3 5 \\
+        --stockfish-elo 1000 1200 1400 1600 1800 \\
         --games 20 \\
         --stockfish /opt/homebrew/bin/stockfish \\
         --conditioning match_color
@@ -147,6 +155,85 @@ def run_tournament(
     return records
 
 
+def run_smart_elo_tournament(
+    patzer: "Patzer",
+    checkpoint_path: str,
+    stockfish_binary: str,
+    n_games: int,
+    anchor_elos: list[int],
+    refine_step: int = 100,
+    max_refine_rounds: int = 2,
+) -> list[dict]:
+    """
+    Smart workflow:
+      1) run anchor ELOs to bracket where score crosses 50%
+      2) add midpoint-ish probes around the crossing for sharper estimate
+    """
+    records: list[dict] = []
+    tested: set[int] = set()
+
+    def _run_elo(elo: int) -> tuple[float, dict]:
+        sf = StockfishPlayer(stockfish_binary, elo_limit=elo)
+        w, l, d = _play_match(patzer, sf, n_games, f"elo={elo}")
+        sf.close()
+        rec = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "checkpoint": checkpoint_path,
+            "iter_num": patzer.iter_num,
+            "stockfish_depth": None,
+            "stockfish_elo": elo,
+            "games": n_games,
+            "temperature": patzer.temperature,
+            "top_k": patzer.top_k,
+            "conditioning": patzer.conditioning,
+            "W": w, "L": l, "D": d,
+        }
+        score = (w + 0.5 * d) / n_games if n_games else 0.0
+        return score, rec
+
+    for elo in sorted(anchor_elos):
+        if elo in tested:
+            continue
+        score, rec = _run_elo(elo)
+        records.append(rec)
+        tested.add(elo)
+        print(f"  [smart] elo={elo} score={score:.3f}")
+
+    for _ in range(max_refine_rounds):
+        points = sorted(
+            ((r["stockfish_elo"], (r["W"] + 0.5 * r["D"]) / r["games"]) for r in records),
+            key=lambda x: x[0],
+        )
+        lower = [p for p in points if p[1] >= 0.5]
+        upper = [p for p in points if p[1] < 0.5]
+        if not lower or not upper:
+            break
+        # Use the nearest straddling pair around 50%, not far extremes.
+        lo_elo = max(lower, key=lambda x: x[0])[0]  # highest elo with score >= 50%
+        hi_elo = min(upper, key=lambda x: x[0])[0]  # lowest elo with score < 50%
+        if hi_elo <= lo_elo:
+            break
+        if hi_elo - lo_elo <= refine_step:
+            break
+        probe = ((hi_elo + lo_elo) // 2 // refine_step) * refine_step
+        if probe in tested:
+            # If midpoint already tested due to rounding, try neighboring buckets.
+            alt_low = probe - refine_step
+            alt_high = probe + refine_step
+            if lo_elo < alt_low < hi_elo and alt_low not in tested:
+                probe = alt_low
+            elif lo_elo < alt_high < hi_elo and alt_high not in tested:
+                probe = alt_high
+            else:
+                break
+        score, rec = _run_elo(probe)
+        records.append(rec)
+        tested.add(probe)
+        print(f"  [smart] probe elo={probe} score={score:.3f}")
+
+    return records
+
+
 def save_results(records: list[dict]):
     existing = load_results()
     existing.extend(records)
@@ -201,6 +288,88 @@ def aggregate_results(records: list[dict]) -> list[dict]:
     return rows
 
 
+
+def estimate_model_elo(records: list[dict]) -> list[dict]:
+    """Estimate model ELO from elo-limited Stockfish results.
+
+    For each (checkpoint, conditioning, temperature, top_k) group, compute score vs
+    each configured Stockfish ELO and interpolate the model ELO at 50% expected score.
+    """
+    grouped: dict[tuple, list[tuple[int, float, int]]] = {}
+
+    for r in aggregate_results(records):
+        elo = r.get("stockfish_elo")
+        if elo is None:
+            continue
+        total = r["W"] + r["L"] + r["D"]
+        if total == 0:
+            continue
+        score = (r["W"] + 0.5 * r["D"]) / total
+        key = (
+            r["checkpoint"],
+            r.get("conditioning", ""),
+            r.get("temperature", 1.0),
+            r.get("top_k"),
+        )
+        grouped.setdefault(key, []).append((elo, score, total))
+
+    estimates = []
+    for key, points in grouped.items():
+        points.sort(key=lambda x: x[0])
+        below = [p for p in points if p[1] >= 0.5]
+        above = [p for p in points if p[1] < 0.5]
+
+        est = None
+        note = ""
+        if below and above:
+            # Interpolate from the nearest straddling pair around score=50%.
+            lo = max(below, key=lambda x: x[0])  # highest elo with score >= 50%
+            hi = min(above, key=lambda x: x[0])  # lowest elo with score < 50%
+            if lo[0] != hi[0] and lo[1] != hi[1]:
+                t = (0.5 - hi[1]) / (lo[1] - hi[1])
+                est = hi[0] + t * (lo[0] - hi[0])
+                note = "interpolated"
+        elif below:
+            strongest = max(points, key=lambda x: x[0])
+            est = float(strongest[0])
+            note = "lower_bound"
+        elif above:
+            weakest = min(points, key=lambda x: x[0])
+            est = float(weakest[0])
+            note = "upper_bound"
+
+        estimates.append({
+            "checkpoint": key[0],
+            "conditioning": key[1],
+            "temperature": key[2],
+            "top_k": key[3],
+            "elo_estimate": est,
+            "n_points": len(points),
+            "total_games": sum(p[2] for p in points),
+            "method": note,
+        })
+
+    estimates.sort(key=lambda r: (r["checkpoint"], r["conditioning"]))
+    return estimates
+
+
+def show_elo_estimates():
+    records = load_results()
+    estimates = estimate_model_elo(records)
+    if not estimates:
+        print("No ELO-limited results yet. Run with --stockfish-elo first.")
+        return
+
+    print(f"\n{'Checkpoint':<40} {'Cond':<12} {'T':>4} {'Games':>6} {'Pts':>4} {'EstElo':>8} {'Method':<14}")
+    print("-" * 98)
+    for r in estimates:
+        ckpt = Path(r["checkpoint"]).name
+        elo = "n/a" if r["elo_estimate"] is None else f"{r['elo_estimate']:.0f}"
+        print(
+            f"{ckpt:<40} {r['conditioning']:<12} {r['temperature']:>4.1f} "
+            f"{r['total_games']:>6} {r['n_points']:>4} {elo:>8} {r['method']:<14}"
+        )
+
 def show_results():
     records = load_results()
     if not records:
@@ -229,9 +398,19 @@ def main():
     parser = argparse.ArgumentParser(description="Patzer vs Stockfish tournament")
     parser.add_argument("--checkpoint", help="Path to checkpoint (local or R2 key)")
     parser.add_argument("--pull-r2", action="store_true", help="Download checkpoint from R2 first")
-    parser.add_argument("--depths", nargs="+", type=int, default=[1, 3, 5])
+    parser.add_argument("--depths", nargs="+", type=int, default=[],
+                        help="Legacy depth-based opponents (prefer --stockfish-elo or --smart-elo)")
     parser.add_argument("--stockfish-elo", nargs="+", type=int, default=None,
                         help="ELO-limited Stockfish targets (e.g. --stockfish-elo 1200 1500)")
+    parser.add_argument("--smart-elo", action="store_true",
+                        help="Run adaptive ELO ladder, then estimate model ELO")
+    parser.add_argument("--anchor-elos", nargs="+", type=int,
+                        default=[900, 1100, 1300, 1500, 1700, 1900],
+                        help="Anchor ELOs used by --smart-elo")
+    parser.add_argument("--refine-step", type=int, default=100,
+                        help="Probe step size for --smart-elo refinement")
+    parser.add_argument("--max-refine-rounds", type=int, default=2,
+                        help="Extra probe rounds for --smart-elo")
     parser.add_argument("--games", type=int, default=20, help="Games per depth (alternates colors)")
     parser.add_argument("--stockfish", default="/opt/homebrew/bin/stockfish")
     parser.add_argument("--temperature", type=float, default=0.1)
@@ -247,10 +426,15 @@ def main():
         ),
     )
     parser.add_argument("--show", action="store_true", help="Print accumulated results and exit")
+    parser.add_argument("--estimate-elo", action="store_true", help="Estimate Patzer ELO from elo-limited runs")
     args = parser.parse_args()
 
     if args.show:
         show_results()
+        return
+
+    if args.estimate_elo:
+        show_elo_estimates()
         return
 
     if not args.checkpoint:
@@ -286,6 +470,9 @@ def main():
             )
         sys.exit(1)
 
+    if not args.smart_elo and not args.depths and not args.stockfish_elo:
+        parser.error("Provide --smart-elo, --stockfish-elo, or --depths")
+
     patzer = Patzer(
         ckpt_path,
         device=args.device,
@@ -294,10 +481,29 @@ def main():
         conditioning=args.conditioning,
     )
 
-    records = run_tournament(patzer, args.checkpoint, args.stockfish, args.depths, args.games,
-                             elo_limits=args.stockfish_elo)
+    if args.smart_elo:
+        records = run_smart_elo_tournament(
+            patzer,
+            args.checkpoint,
+            args.stockfish,
+            args.games,
+            anchor_elos=args.anchor_elos,
+            refine_step=args.refine_step,
+            max_refine_rounds=args.max_refine_rounds,
+        )
+    else:
+        records = run_tournament(
+            patzer,
+            args.checkpoint,
+            args.stockfish,
+            args.depths,
+            args.games,
+            elo_limits=args.stockfish_elo,
+        )
     save_results(records)
     show_results()
+    if args.smart_elo or args.stockfish_elo:
+        show_elo_estimates()
 
     if patzer.illegal_move_count:
         print(f"\n[note] fell back to random move {patzer.illegal_move_count} time(s)")
