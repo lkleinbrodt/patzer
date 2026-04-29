@@ -253,7 +253,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Download and process Lichess game database dumps."
     )
-    parser.add_argument("--output-dir", type=str, required=True,
+    #default output is ./data/lichess_games/
+    parser.add_argument("--output-dir", type=str, default="data/lichess_games",
                         help="Directory to store processed output files")
     parser.add_argument("--months", type=str, nargs="+", default=None,
                         help="Specific months to process e.g. 2024-01 2024-02. "

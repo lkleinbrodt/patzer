@@ -35,7 +35,8 @@ from patzer.tokenizer import ChessTokenizer
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, default="data/games.txt",
+
+    parser.add_argument("--input", type=str, default="data/lichess_games/games_*.txt",
                         help="Input games file (default: data/games.txt)")
     parser.add_argument("--output-dir", type=str, default="data/prepared",
                         help="Output directory for binary files (default: data/prepared)")
