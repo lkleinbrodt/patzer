@@ -208,13 +208,24 @@ def run_smart_elo_tournament(
         upper = [p for p in points if p[1] < 0.5]
         if not lower or not upper:
             break
-        lo_elo = min(lower, key=lambda x: x[0])[0]
-        hi_elo = max(upper, key=lambda x: x[0])[0]
+        # Use the nearest straddling pair around 50%, not far extremes.
+        lo_elo = max(lower, key=lambda x: x[0])[0]  # highest elo with score >= 50%
+        hi_elo = min(upper, key=lambda x: x[0])[0]  # lowest elo with score < 50%
+        if hi_elo <= lo_elo:
+            break
         if hi_elo - lo_elo <= refine_step:
             break
         probe = ((hi_elo + lo_elo) // 2 // refine_step) * refine_step
         if probe in tested:
-            break
+            # If midpoint already tested due to rounding, try neighboring buckets.
+            alt_low = probe - refine_step
+            alt_high = probe + refine_step
+            if lo_elo < alt_low < hi_elo and alt_low not in tested:
+                probe = alt_low
+            elif lo_elo < alt_high < hi_elo and alt_high not in tested:
+                probe = alt_high
+            else:
+                break
         score, rec = _run_elo(probe)
         records.append(rec)
         tested.add(probe)
@@ -311,8 +322,9 @@ def estimate_model_elo(records: list[dict]) -> list[dict]:
         est = None
         note = ""
         if below and above:
-            lo = min(below, key=lambda x: x[0])
-            hi = max(above, key=lambda x: x[0])
+            # Interpolate from the nearest straddling pair around score=50%.
+            lo = max(below, key=lambda x: x[0])  # highest elo with score >= 50%
+            hi = min(above, key=lambda x: x[0])  # lowest elo with score < 50%
             if lo[0] != hi[0] and lo[1] != hi[1]:
                 t = (0.5 - hi[1]) / (lo[1] - hi[1])
                 est = hi[0] + t * (lo[0] - hi[0])
