@@ -279,23 +279,39 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        val_loss = losses['val'].item()
+        train_loss_eval = losses['train'].item()
+        print(f"step {iter_num}: train loss {train_loss_eval:.4f}, val loss {val_loss:.4f}")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
+                "train/loss": train_loss_eval,
+                "val/loss": val_loss,
                 "lr": lr,
-                "mfu": running_mfu*100, # convert to percentage
+                "mfu": running_mfu*100,
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
+        # append to metrics log and push to R2 so training curve is always visible
+        import json as _json, time as _time
+        metrics_local = os.path.join(out_dir, 'metrics.jsonl')
+        with open(metrics_local, 'a') as _f:
+            _f.write(_json.dumps({
+                "iter": iter_num,
+                "train_loss": train_loss_eval,
+                "val_loss": val_loss,
+                "lr": lr,
+                "mfu": round(running_mfu * 100, 2),
+                "ts": _time.time(),
+            }) + "\n")
+        r2.push_file(metrics_local, f"{out_dir}/metrics.jsonl")
+        if val_loss < best_val_loss or always_save_checkpoint:
+            best_val_loss = min(best_val_loss, val_loss)
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'model_args': model_args,
                     'iter_num': iter_num,
+                    'val_loss': val_loss,
                     'best_val_loss': best_val_loss,
                     'config': config,
                 }

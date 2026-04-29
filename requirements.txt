@@ -1,3 +1,4 @@
 chess
 boto3
 python-dotenv
+wandb

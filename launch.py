@@ -28,6 +28,20 @@ except ImportError:
 GITHUB_REPO = "https://github.com/lkleinbrodt/patzer.git"
 IMAGE = "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel"
 WORKSPACE = "/workspace/patzer"
+VAST_API_KEY_PATH = Path.home() / ".config" / "vastai" / "vast_api_key"
+
+
+def _vast_api_key() -> str | None:
+    key = os.environ.get("VAST_API_KEY")
+    if key:
+        return key
+    if VAST_API_KEY_PATH.exists():
+        return VAST_API_KEY_PATH.read_text().strip()
+    return None
+
+
+def _wandb_api_key() -> str | None:
+    return os.environ.get("WANDB_API_KEY") or os.environ.get("wandb_api_key")
 
 
 def vast(*args, raw=True):
@@ -44,29 +58,64 @@ def r2_env_flags() -> str:
     missing = [k for k in keys if not os.environ.get(k)]
     if missing:
         print(f"WARNING: R2 env vars not set: {missing}")
-    return " ".join(f"-e {k}={os.environ[k]}" for k in keys if os.environ.get(k))
+    pairs = {k: os.environ[k] for k in keys if os.environ.get(k)}
+    api_key = _vast_api_key()
+    if api_key:
+        pairs["VAST_API_KEY"] = api_key
+    wb = _wandb_api_key()
+    if wb:
+        pairs["WANDB_API_KEY"] = wb
+    return " ".join(f"-e {k}={v}" for k, v in pairs.items())
 
 
 def r2_export_lines() -> str:
-    """Shell export lines for R2 vars, used in scripts running on existing instances."""
+    """Shell export lines for R2 + Vast vars, used in scripts running on existing instances."""
     keys = ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET",
             "R2_ENDPOINT_URL", "R2_ACCOUNT_ID"]
-    return "\n".join(
-        f"export {k}='{os.environ[k]}'"
-        for k in keys if os.environ.get(k)
-    )
+    lines = [f"export {k}='{os.environ[k]}'" for k in keys if os.environ.get(k)]
+    api_key = _vast_api_key()
+    if api_key:
+        lines.append(f"export VAST_API_KEY='{api_key}'")
+    wb = _wandb_api_key()
+    if wb:
+        lines.append(f"export WANDB_API_KEY='{wb}'")
+    return "\n".join(lines)
 
 
-def build_script(config: str, resume: bool, wipe: bool = False) -> str:
+def build_script(config: str, resume: bool, wipe: bool = False, terminate_on_error: bool = False) -> str:
     pull_ckpt = (
         f"python -c \"import sys; sys.path.insert(0,'patzer'); import r2; "
         f"r2.pull_dir('checkpoints', 'checkpoints')\" || true"
         if resume else ""
     )
     resume_flag = "--init_from=resume" if resume else ""
+
+    # Vast.ai injects $CONTAINER_ID inside the container — that's the instance ID.
+    # We install vastai so the script can self-destruct when done.
+    kill_on_error = "1" if terminate_on_error else "0"
+    trap = f"""\
+_on_exit() {{
+    EXIT_CODE=$?
+    echo "=== Training exited (code $EXIT_CODE) ==="
+    cd {WORKSPACE}/patzer && python -c "
+import sys; sys.path.insert(0, '.')
+import r2
+r2.push_file('/workspace/train.log', 'logs/train_${{CONTAINER_ID:-unknown}}.log')
+print('[r2] log pushed')
+" || echo "[warn] log push to R2 failed"
+    if [ $EXIT_CODE -eq 0 ] || [ {kill_on_error} -eq 1 ]; then
+        echo "Destroying instance ${{CONTAINER_ID}}..."
+        vastai --api-key "$VAST_API_KEY" destroy instance "$CONTAINER_ID" || true
+    else
+        echo "Training failed — instance kept alive for debugging (id=${{CONTAINER_ID}})"
+        echo "SSH in to inspect, then: vastai destroy instance ${{CONTAINER_ID}}"
+    fi
+}}
+trap _on_exit EXIT"""
+
     return "\n".join(filter(None, [
         "#!/bin/bash",
-        "set -e",
+        "set -eo pipefail",
         # On new instances R2 vars come from Docker env; on existing instances
         # we write them explicitly so they're available to the training process.
         r2_export_lines(),
@@ -75,9 +124,11 @@ def build_script(config: str, resume: bool, wipe: bool = False) -> str:
         f"git clone {GITHUB_REPO} {WORKSPACE}",
         f"cd {WORKSPACE}",
         "pip install -q -r requirements.txt",
+        "pip install -q vastai",
+        trap,
         "cd patzer",
         pull_ckpt,
-        f"python train.py config/{config}.py {resume_flag}".strip(),
+        f"python -u train.py config/{config}.py {resume_flag} 2>&1 | tee /workspace/train.log".strip(),
     ]))
 
 
@@ -110,7 +161,7 @@ def ssh_prefix(info: dict) -> list[str]:
             "-o", "ConnectTimeout=15", f"root@{host}"]
 
 
-def run_on_instance(instance_id: int, config: str, resume: bool):
+def run_on_instance(instance_id: int, config: str, resume: bool, terminate_on_error: bool = False):
     print(f"Fetching info for instance {instance_id}...")
     info = vast("show", "instance", str(instance_id))
     status = info.get("actual_status", "unknown")
@@ -123,7 +174,7 @@ def run_on_instance(instance_id: int, config: str, resume: bool):
     print(f"Instance is running — {info.get('gpu_name', '?')} @ {host}:{port}")
     print(f"Wiping {WORKSPACE} and doing a fresh clone...")
 
-    script = build_script(config, resume, wipe=True)
+    script = build_script(config, resume, wipe=True, terminate_on_error=terminate_on_error)
 
     # Write the script to the instance then run it in a tmux session.
     # Piping via stdin avoids any quoting nightmares with the script content.
@@ -179,6 +230,8 @@ def main():
                         help="Number of offers to show (default: 10)")
     parser.add_argument("--interruptible", "-i", action="store_true",
                         help="Use spot/interruptible pricing (~50%% cheaper, can be preempted)")
+    parser.add_argument("--terminate-on-error", action="store_true",
+                        help="Destroy instance even if training fails (default: keep alive for debugging)")
     args = parser.parse_args()
 
     if args.list:
@@ -186,7 +239,7 @@ def main():
         return
 
     if args.instance:
-        run_on_instance(args.instance, args.config, args.resume)
+        run_on_instance(args.instance, args.config, args.resume, args.terminate_on_error)
         return
 
     # --- Rent a new instance ---
@@ -235,9 +288,10 @@ def main():
         "create", "instance", str(offer["id"]),
         "--image", IMAGE,
         "--disk", str(args.disk),
-        "--ssh", "--direct",
+        "--ssh",
         "--env", r2_env_flags(),
-        "--onstart-cmd", build_script(args.config, args.resume, wipe=False),
+        "--onstart-cmd", build_script(args.config, args.resume, wipe=False,
+                                      terminate_on_error=args.terminate_on_error),
     ]
     if args.interruptible:
         bid = round(offer.get("min_bid", offer["dph_total"]) * 1.15, 4)
