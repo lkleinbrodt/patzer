@@ -30,6 +30,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
+import r2
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -125,6 +126,12 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
+
+# pull training binaries from R2 if they don't exist locally
+if master_process and not os.path.exists(os.path.join(data_dir, 'train.bin')):
+    print(f"[r2] {data_dir}/train.bin not found locally, pulling from R2...")
+    r2.pull_dir(data_dir, data_dir)
+
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
@@ -293,7 +300,11 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                ckpt_local = os.path.join(out_dir, 'ckpt.pt')
+                torch.save(checkpoint, ckpt_local)
+                r2.push_file(ckpt_local)
+                # also push a stamped copy so R2 preserves history across evals
+                r2.push_file(ckpt_local, f"{out_dir}/ckpt_{iter_num:06d}.pt")
     if iter_num == 0 and eval_only:
         break
 

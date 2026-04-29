@@ -71,7 +71,8 @@ def pgn_to_uci(pgn_text):
     """
     Convert a single PGN game string to a list of UCI moves.
     Returns (uci_moves, error_message). On failure, uci_moves is None.
-    Uses python-chess for move validation — every move is confirmed legal.
+    Relies on python-chess PGN parsing for legality checks.
+    Illegal or ambiguous SAN moves are captured in game.errors.
     """
     try:
         game = chess.pgn.read_game(io.StringIO(pgn_text))
@@ -81,17 +82,10 @@ def pgn_to_uci(pgn_text):
     if game is None:
         return None, "empty game"
 
-    uci_moves = []
-    board = game.board()
+    if game.errors:
+        return None, f"illegal move: {str(game.errors[0])}"
 
-    for move in game.mainline_moves():
-        # Confirm move is legal on current board state
-        if move not in board.legal_moves:
-            return None, f"illegal move {move.uci()} at position {board.fen()}"
-        uci_moves.append(move.uci())
-        board.push(move)
-
-    return uci_moves, None
+    return [move.uci() for move in game.mainline_moves()], None
 
 
 def parse_games(pgn_stream, output_file, args):

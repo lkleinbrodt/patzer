@@ -373,11 +373,25 @@ def main():
             expected = checksums.get(filename)
             if expected:
                 if not verify_sha256(zst_path, expected):
-                    log.error(f"Checksum failed for {filename}. "
-                              f"Deleting corrupt file and skipping.")
-                    zst_path.unlink()
-                    fail_count += 1
-                    continue
+                    log.error(
+                        f"Checksum failed for {filename}. "
+                        "Deleting local file and retrying download once."
+                    )
+                    zst_path.unlink(missing_ok=True)
+
+                    # One automatic recovery attempt: fresh download + re-verify.
+                    if not download_file(url, zst_path):
+                        log.error(f"Retry download failed for {filename}, skipping.")
+                        fail_count += 1
+                        continue
+                    if not verify_sha256(zst_path, expected):
+                        log.error(
+                            f"Checksum still failed after retry for {filename}. "
+                            "Deleting file and skipping."
+                        )
+                        zst_path.unlink(missing_ok=True)
+                        fail_count += 1
+                        continue
             else:
                 log.warning(f"No checksum found for {filename}, skipping verification.")
         else:

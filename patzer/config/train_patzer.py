@@ -1,38 +1,39 @@
-# v0 patzer model
-# good for debugging and playing on macbooks and such
+# patzer v0 — 12M param GPT on Lichess games
+#
+# Data: 80M train tokens, vocab=4214, block_size=256
+# Throughput: batch=128 * block=256 = 32,768 tokens/iter → 2,441 iters/epoch
+# 20,000 iters ≈ 8 epochs (~655M tokens seen, near Chinchilla-optimal for 12M params)
 
 out_dir = 'checkpoints/patzer_v0'
-eval_interval = 250 # keep frequent because we'll overfit
+eval_interval = 1000   # eval every ~0.4 epochs
 eval_iters = 200
-log_interval = 10 # don't print too too often
+log_interval = 100
 
-# we expect to overfit on this small dataset, so only save when val improves
 always_save_checkpoint = True
 
-wandb_log = False # override via command line if you like
+wandb_log = False
 wandb_project = 'patzer'
 wandb_run_name = 'patzer_v0'
 
 dataset = 'prepared'
 gradient_accumulation_steps = 1
-batch_size = 64
-block_size = 256 # context of up to 256 previous characters
+batch_size = 128
+block_size = 256
 
 vocab_size = 4214
 
-# baby GPT model :)
 n_layer = 6
 n_head = 6
 n_embd = 384
-dropout = 0.00
+bias = False
+dropout = 0.0
 
-learning_rate = 1e-3 # with baby networks can afford to go a bit higher
-max_iters = 10
-lr_decay_iters = max_iters # make equal to max_iters usually
-min_lr = 1e-4 # learning_rate / 10 usually
-beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
+learning_rate = 1e-3
+max_iters = 20000
+lr_decay_iters = 20000
+min_lr = 1e-4
+beta1 = 0.9
+beta2 = 0.99
+warmup_iters = 400     # ~2% of max_iters
 
-warmup_iters = 100 # not super necessary potentially
-
-device = 'mps' 
-compile = False # do not torch compile the model
+device = 'auto'        # cuda on Vast, mps on Mac — compile handled automatically
