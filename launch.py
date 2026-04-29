@@ -1,12 +1,14 @@
 """
 Launch a Vast.ai GPU instance for patzer training.
 
-python launch.py                      # cheapest offer, default config, confirm prompt
-python launch.py --search-only        # print offers and exit
+python launch.py                          # rent cheapest offer, confirm prompt
+python launch.py --search-only            # print offers and exit
+python launch.py --list                   # show your running instances
+python launch.py --instance 12345678      # train on an existing instance (wipe + fresh clone)
 python launch.py --config train_patzer_v1
-python launch.py --resume             # pull R2 checkpoint and pass --init_from=resume
-python launch.py --interruptible      # use spot pricing (~50% cheaper, can be interrupted)
-python launch.py --max-price 0.30     # cap $/hr
+python launch.py --resume                 # pull R2 checkpoint and pass --init_from=resume
+python launch.py --interruptible          # spot pricing (~50% cheaper, can be preempted)
+python launch.py --max-price 0.30
 """
 
 import argparse
@@ -45,7 +47,17 @@ def r2_env_flags() -> str:
     return " ".join(f"-e {k}={os.environ[k]}" for k in keys if os.environ.get(k))
 
 
-def build_onstart(config: str, resume: bool) -> str:
+def r2_export_lines() -> str:
+    """Shell export lines for R2 vars, used in scripts running on existing instances."""
+    keys = ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET",
+            "R2_ENDPOINT_URL", "R2_ACCOUNT_ID"]
+    return "\n".join(
+        f"export {k}='{os.environ[k]}'"
+        for k in keys if os.environ.get(k)
+    )
+
+
+def build_script(config: str, resume: bool, wipe: bool = False) -> str:
     pull_ckpt = (
         f"python -c \"import sys; sys.path.insert(0,'patzer'); import r2; "
         f"r2.pull_dir('checkpoints', 'checkpoints')\" || true"
@@ -55,8 +67,11 @@ def build_onstart(config: str, resume: bool) -> str:
     return "\n".join(filter(None, [
         "#!/bin/bash",
         "set -e",
-        # persist R2 env vars for SSH sessions
+        # On new instances R2 vars come from Docker env; on existing instances
+        # we write them explicitly so they're available to the training process.
+        r2_export_lines(),
         "env | grep -E '^R2_' >> /etc/environment",
+        f"rm -rf {WORKSPACE}" if wipe else "",
         f"git clone {GITHUB_REPO} {WORKSPACE}",
         f"cd {WORKSPACE}",
         "pip install -q -r requirements.txt",
@@ -75,13 +90,85 @@ def print_offers(offers):
               f"{o['dph_total']:>6.3f}  {o['reliability2']:>11.3f}  {o['id']:>10}")
 
 
+def list_instances():
+    instances = vast("show", "instances")
+    if not instances:
+        print("No running instances.")
+        return
+    print(f"\n  {'ID':>10}  {'Status':<14}  {'GPU':<24}  {'$/hr':>6}")
+    print("  " + "-" * 60)
+    for inst in instances:
+        print(f"  {inst['id']:>10}  {inst.get('actual_status','?'):<14}  "
+              f"{inst.get('gpu_name','?'):<24}  ${inst.get('dph_total', 0):.3f}")
+    print()
+
+
+def ssh_prefix(info: dict) -> list[str]:
+    host = info.get("ssh_host") or info.get("public_ipaddr")
+    port = info.get("ssh_port", 22)
+    return ["ssh", "-p", str(port), "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=15", f"root@{host}"]
+
+
+def run_on_instance(instance_id: int, config: str, resume: bool):
+    print(f"Fetching info for instance {instance_id}...")
+    info = vast("show", "instance", str(instance_id))
+    status = info.get("actual_status", "unknown")
+    if status != "running":
+        print(f"Instance {instance_id} is not running (status: {status}). Start it first.")
+        sys.exit(1)
+
+    host = info.get("ssh_host") or info.get("public_ipaddr")
+    port = info.get("ssh_port", 22)
+    print(f"Instance is running — {info.get('gpu_name', '?')} @ {host}:{port}")
+    print(f"Wiping {WORKSPACE} and doing a fresh clone...")
+
+    script = build_script(config, resume, wipe=True)
+
+    # Write the script to the instance then run it in a tmux session.
+    # Piping via stdin avoids any quoting nightmares with the script content.
+    setup_cmd = (
+        "apt-get install -y tmux -qq 2>/dev/null; "
+        "cat > /tmp/patzer_train.sh; "
+        "chmod +x /tmp/patzer_train.sh; "
+        "tmux kill-session -t patzer 2>/dev/null || true; "
+        "tmux new-session -d -s patzer "
+        "  'bash /tmp/patzer_train.sh 2>&1 | tee /workspace/train.log'; "
+        "echo 'Training started in tmux session: patzer'"
+    )
+
+    result = subprocess.run(
+        ssh_prefix(info) + [setup_cmd],
+        input=script,
+        text=True,
+    )
+    if result.returncode != 0:
+        print("Failed to start training on instance. Check SSH access.")
+        sys.exit(1)
+
+    print(f"""
+Training started on instance {instance_id}.
+
+  SSH:         ssh -p {port} root@{host}
+  Attach tmux: ssh -p {port} root@{host} -t tmux attach -t patzer
+  Tail log:    ssh -p {port} root@{host} tail -f /workspace/train.log
+  Vast logs:   vastai logs {instance_id}
+  Destroy:     vastai destroy instance {instance_id}
+""")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="train_patzer",
                         help="Config filename without .py (default: train_patzer)")
     parser.add_argument("--resume", action="store_true",
                         help="Pull R2 checkpoint before training (pass init_from=resume)")
-    parser.add_argument("--disk", type=int, default=40, help="Disk size in GB (default: 40)")
+    parser.add_argument("--instance", type=int, metavar="ID",
+                        help="Run on an existing instance instead of renting a new one")
+    parser.add_argument("--list", action="store_true",
+                        help="List your running instances and exit")
+    parser.add_argument("--disk", type=int, default=40,
+                        help="Disk size in GB for new instances (default: 40)")
     parser.add_argument("--min-gpu-ram", type=int, default=8,
                         help="Min GPU VRAM in GB (default: 8)")
     parser.add_argument("--max-price", type=float, default=0.60,
@@ -91,14 +178,23 @@ def main():
     parser.add_argument("--limit", type=int, default=10,
                         help="Number of offers to show (default: 10)")
     parser.add_argument("--interruptible", "-i", action="store_true",
-                        help="Use spot/interruptible pricing (~50% cheaper, can be preempted)")
+                        help="Use spot/interruptible pricing (~50%% cheaper, can be preempted)")
     args = parser.parse_args()
+
+    if args.list:
+        list_instances()
+        return
+
+    if args.instance:
+        run_on_instance(args.instance, args.config, args.resume)
+        return
+
+    # --- Rent a new instance ---
 
     query = (f"num_gpus=1 gpu_ram>={args.min_gpu_ram} rentable=true verified=true "
              f"compute_cap>=750 dph_total<={args.max_price}")
 
-    search_args = ["search", "offers", query, "-o", "dph_total",
-                   "--limit", str(args.limit)]
+    search_args = ["search", "offers", query, "-o", "dph_total", "--limit", str(args.limit)]
     if args.interruptible:
         search_args.append("--interruptible")
 
@@ -141,7 +237,7 @@ def main():
         "--disk", str(args.disk),
         "--ssh", "--direct",
         "--env", r2_env_flags(),
-        "--onstart-cmd", build_onstart(args.config, args.resume),
+        "--onstart-cmd", build_script(args.config, args.resume, wipe=False),
     ]
     if args.interruptible:
         bid = round(offer.get("min_bid", offer["dph_total"]) * 1.15, 4)
@@ -169,16 +265,18 @@ def main():
         print(f"\nTimed out. Check status with: vastai show instance {instance_id}")
         sys.exit(1)
 
-    ssh_host = info.get("ssh_host") or info.get("public_ipaddr", "<host>")
-    ssh_port = info.get("ssh_port", 22)
+    host = info.get("ssh_host") or info.get("public_ipaddr", "<host>")
+    port = info.get("ssh_port", 22)
 
     print(f"""
 Instance {instance_id} is running!
 
-  SSH:      ssh -p {ssh_port} root@{ssh_host}
-  Logs:     vastai logs {instance_id}
-  Stop:     vastai stop instance {instance_id}
-  Destroy:  vastai destroy instance {instance_id}
+  SSH:         ssh -p {port} root@{host}
+  Attach tmux: ssh -p {port} root@{host} -t tmux attach -t patzer
+  Tail log:    ssh -p {port} root@{host} tail -f /workspace/train.log
+  Vast logs:   vastai logs {instance_id}
+  Stop:        vastai stop instance {instance_id}
+  Destroy:     vastai destroy instance {instance_id}
 
 Training is starting via the onstart script (git clone → pip install → train).
 Checkpoints will push to R2 at every eval interval.
