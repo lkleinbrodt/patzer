@@ -78,13 +78,10 @@ def fetch_text(url):
 
 
 def parse_file_list(list_text):
-    """
-    Parse list.txt — one filename per line, e.g.:
-        lichess_db_standard_rated_2024-01.pgn.zst
-    Returns list of filenames sorted oldest-first.
-    """
     files = [line.strip() for line in list_text.splitlines() if line.strip()]
-    files.sort()  # alphabetical = chronological for YYYY-MM filenames, oldest first
+    # Extract just the filename from full URLs if necessary
+    files = [Path(f).name if f.startswith('http') else f for f in files]
+    files.sort()
     return files
 
 
@@ -337,8 +334,9 @@ def main():
     if args.dry_run:
         log.info("DRY RUN — would process:")
         for f in todo:
-            size_note = f"  checksum: {'known' if f in checksums else 'MISSING'}"
-            log.info(f"  {f}{size_note}")
+            filename = Path(f).name
+            size_note = f"  checksum: {'known' if filename in checksums else 'MISSING'}"
+            log.info(f"  {filename}{size_note}")
         return
 
     if not todo:
