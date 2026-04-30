@@ -31,7 +31,7 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **2026-04-29:** Vast (RTX 3060 12GB) OOM guard: switched v2/v3 configs to `batch_size=32` with `gradient_accumulation_steps=4` to preserve the same effective tokens/iter while reducing VRAM.
 
-- **2026-04-30:** Resuming cloud training runs: `launch.py --resume` pulls `checkpoints/` from R2 and runs `train.py --init_from=resume` (resume from `out_dir/ckpt.pt`). To continue a finished run (e.g. v2 stopped at 150k but val loss still falling), bump `max_iters` / `lr_decay_iters` above the prior stop and relaunch on Vast with `--resume`.
+- **2026-04-30:** Resuming cloud training runs: `launch.py --resume` pulls `checkpoints/` from R2 and runs `train.py --init_from=resume` (resume from `out_dir/ckpt.pt`). To continue a finished run (e.g. v2 stopped at 150k but val loss still falling), bump **`max_iters`** above the prior stop and relaunch with `--resume`. **Do not raise `lr_decay_iters` to match the new `max_iters` unless you intend to:** `get_lr()` only depends on `iter_num` and the *current* `lr_decay_iters` in the config, not on what schedule was used before the checkpoint. If the first job ended near the cosine floor (e.g. `lr_decay_iters=150k` → LR ≈ `min_lr` at 150k) and the second job sets `lr_decay_iters=250k`, then at 150k the cosine ratio moves back into the middle of the curve and **LR jumps ~35×** for v2 hyperparams—train loss recovers but **val loss can spike** right after resume until the schedule cools again. Fix: keep `lr_decay_iters` at the **original** total (stay at `min_lr` for the extension), or use a deliberate warm-restart / new schedule, or add checkpoint-persisted schedule state if we need something fancier.
 
 - **2026-04-30:** Vast offer selection now accounts for **bandwidth costs**: `launch.py` surfaces `inet_up_cost` / `inet_down_cost` ($/GB) in the offer list and computes an estimated **all-in $/hr** using `--up-gb-per-hr` / `--down-gb-per-hr`, with optional filters `--max-inet-up-cost` / `--max-inet-down-cost`.
 
@@ -44,3 +44,10 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **2026-04-30:** Eval display-name fix: `eval/tournament.py` and `eval/model_tournament.py` now prefer the **model version** directory (`patzer_v*`) for the `Model` label instead of checkpoint filenames like `ckpt_150000`, so tables show stable model ids with iteration shown separately (or as `_best` when appropriate).
 - **2026-04-30:** `eval/model_tournament.py` aggregate leaderboard: re-derive display tags from `model_a`/`model_b` + `settings.prefix` so **historical** `model_results.json` rows (filename-only keys + old `label_*` strings) show `patzer_v2` + `Iter` (and `patzer_v2_best` for `ckpt_best.pt`) instead of `ckpt_050000.pt@...`.
+
+- **2026-04-30:** **Eval system overhaul.** Deleted `tournament.py` (762 lines), `model_tournament.py` (1238 lines), `sweep.py` (broken), and all JSON result files. Replaced with three focused files:
+  - `eval/db.py` — thin SQLite wrapper; one row per game, no aggregation
+  - `eval/elo.py` — Bradley-Terry MLE; Stockfish anchored at configured Elo, Patzer models fitted; confidence intervals from Fisher information
+  - `eval/evaluate.py` — single CLI (`stockfish`, `head2head`, `leaderboard`, `history`, `progress` subcommands)
+
+  Key design wins: individual game records (re-analyzable), relative checkpoint paths (no `/Users/lando/...` baked in), no SPRT (was almost always "inconclusive" at 8–12 games), no R2 discovery baked into eval, unified leaderboard from all stored games. The adaptive Bayesian Elo estimation loop from `tournament.py` is preserved exactly in the `stockfish` subcommand. Results live in `eval/results.db` (gitignored). Prior JSON records discarded — cheap to re-run.

@@ -22,6 +22,8 @@ log_interval = 100
 always_save_checkpoint = True
 ckpt_save_interval = 10000
 weights_snapshot_interval = 10000
+early_stop_patience_evals = 30
+early_stop_min_iters = 50000
 
 wandb_log = True
 wandb_project = 'patzer'
@@ -43,7 +45,7 @@ dropout = 0.0
 
 # Keep v1 LR for comparability; train longer because we have vastly more data.
 learning_rate = 1e-3
-max_iters = 250000
+max_iters = 350000
 lr_decay_iters = 250000
 min_lr = 1e-5
 beta1 = 0.9

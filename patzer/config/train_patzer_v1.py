@@ -1,8 +1,8 @@
 # patzer v1 — 12M param GPT on Lichess games
 #
-# Data: ~250M train tokens, vocab=4214, block_size=256
+# Data: ~80M train tokens, vocab=4214, block_size=256
 # Throughput: batch=128 * block=256 = 32,768 tokens/iter → 7,612 iters/epoch
-# 40,000 iters ≈ 5.25 epochs (~1.3B tokens seen, near Chinchilla-optimal for 12M params)
+
 
 out_dir = 'checkpoints/patzer_v1'
 eval_interval = 1000   # eval every ~0.4 epochs

@@ -42,8 +42,8 @@ bias = False
 dropout = 0.0
 
 learning_rate = 6e-4
-max_iters = 150000
-lr_decay_iters = max_iters
+max_iters = 300000
+lr_decay_iters = 150000
 min_lr = 1e-5
 beta1 = 0.9
 beta2 = 0.95

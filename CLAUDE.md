@@ -65,8 +65,10 @@ python launch.py --list
 ### Checkpoint sync (Cloudflare R2)
 ```bash
 cd patzer
-python r2.py push data/prepared          # upload tokenized data
-python r2.py pull checkpoints/patzer_v0  # download checkpoint
+python r2.py push data/prepared                                      # upload tokenized data
+python r2.py pull checkpoints/patzer_v2/weights_best.pt              # pull single file (skips if exists)
+python r2.py pull checkpoints/patzer_v2                              # pull full dir (skips existing)
+python r2.py pull checkpoints/patzer_v2/weights_best.pt --force      # re-download even if local copy exists
 ```
 
 ### Tokenizer sanity check
@@ -86,6 +88,29 @@ python dataset.py data/prepared/train.bin
 cd patzer
 python sample.py --out_dir=checkpoints/patzer_v0
 ```
+
+### Evaluate
+```bash
+# Estimate a model's Elo vs Stockfish (adaptive Bayesian, stops when confident)
+python eval/evaluate.py stockfish checkpoints/patzer_v2/weights_best.pt --games 50 --device mps
+
+# Compare two models head-to-head
+python eval/evaluate.py head2head checkpoints/patzer_v2/weights_best.pt checkpoints/patzer_v1/weights_best.pt --games 20 --device mps
+
+# Round-robin across multiple checkpoints
+python eval/evaluate.py head2head checkpoints/patzer_v2/weights_iter_010000.pt checkpoints/patzer_v2/weights_iter_050000.pt checkpoints/patzer_v2/weights_best.pt --round-robin --games 10 --device mps
+
+# Show unified Elo leaderboard (computed from all stored games)
+python eval/evaluate.py leaderboard
+
+# Show game history for a model
+python eval/evaluate.py history patzer_v2
+
+# Plot Elo progression over training steps (requires prior stockfish runs)
+python eval/evaluate.py progress patzer_v2
+```
+
+All results are stored in `eval/results.db` (SQLite, gitignored). One row per game — no aggregation. Pull checkpoints first with `python patzer/r2.py pull checkpoints/patzer_vN` before evaluating.
 
 ## Architecture
 
@@ -124,5 +149,6 @@ Manages Vast.ai GPU instances via the `vastai` CLI. On new instance creation, bu
 - **Config files** live in `patzer/config/` and are plain Python that reassigns globals. To create a new model version, copy `train_patzer.py` and increment the version.
 - **`device='auto'`** in config files detects cuda → mps → cpu and disables `torch.compile` on non-CUDA devices automatically (see `train.py` lines 83–91).
 - **Data files are gitignored** (`data/*`). All data lives locally or in R2; never commit binary data.
-- **Checkpoint keys**: `model`, `optimizer`, `model_args`, `iter_num`, `best_val_loss`, `evals_without_improvement`, `config`. Resume from `ckpt.pt` (latest). Use `weights_best.pt` for eval/play (`eval/tournament.py` auto-pick prefers it; falls back to `ckpt_best.pt`). When resuming, only architecture args (`n_layer`, `n_head`, `n_embd`, `block_size`, `bias`, `vocab_size`) are forced to match; other hyperparams can change.
+- **Checkpoint naming**: `ckpt.pt` = latest full checkpoint (optimizer + weights, for resume). `weights_best.pt` = best val-loss weights only (use for eval/play). `weights_iter_XXXXXX.pt` = step snapshots. When resuming, only architecture args (`n_layer`, `n_head`, `n_embd`, `block_size`, `bias`, `vocab_size`) are forced to match; other hyperparams can change.
+- **Checkpoint state dict keys**: `model`, `optimizer`, `model_args`, `iter_num`, `best_val_loss`, `evals_without_improvement`, `config`.
 - The `_orig_mod.` prefix stripping in `train.py` and `sample.py` handles state dict keys from `torch.compile`.
