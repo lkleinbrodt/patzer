@@ -21,6 +21,7 @@ log_interval = 100
 
 always_save_checkpoint = True
 ckpt_save_interval = 10000
+weights_snapshot_interval = 10000
 
 wandb_log = True
 wandb_project = 'patzer'

@@ -4,8 +4,8 @@ eval/play.py
 Play a simple human-vs-Patzer game in the terminal.
 
 Examples:
-  python eval/play.py --checkpoint checkpoints/patzer_v0/ckpt_best.pt --human-color white --device mps
-  python eval/play.py --checkpoint checkpoints/patzer_v0/ckpt_best.pt --human-color black --temperature 0.8 --top-k 50
+  python eval/play.py --checkpoint checkpoints/patzer_v0/weights_best.pt --human-color white --device mps
+  python eval/play.py --checkpoint checkpoints/patzer_v0/weights_best.pt --human-color black --temperature 0.8 --top-k 50
 """
 
 from __future__ import annotations

@@ -44,10 +44,10 @@ def discover_checkpoints(r2_prefix: str) -> list[dict]:
     """
     List all .pt files under r2_prefix in R2, sorted by iter number.
     Returns list of dicts: {r2_key, filename, iter_hint}
-    iter_hint is parsed from the filename (e.g. ckpt_005000.pt → 5000).
-    ckpt.pt and ckpt_best.pt get iter_hint=None (iter_num is read from the file when needed).
-    If both ckpt.pt and ckpt_best.pt exist under the same directory, ckpt.pt is dropped
-    (best-val snapshot is enough for the sweep tail).
+    iter_hint is parsed from the filename (e.g. weights_iter_005000.pt → 5000).
+    ckpt.pt and weights_best.pt get iter_hint=None (iter_num is read from the file when needed).
+    If both ckpt.pt and weights_best.pt exist under the same directory, ckpt.pt is dropped
+    (best snapshot is enough for the sweep tail).
     """
     from patzer.r2 import _client
     client, bucket = _client()
@@ -72,7 +72,7 @@ def discover_checkpoints(r2_prefix: str) -> list[dict]:
     parents_with_best = {
         str(Path(e["r2_key"]).parent)
         for e in entries
-        if e["filename"] == "ckpt_best.pt"
+        if e["filename"] in ("weights_best.pt", "ckpt_best.pt")
     }
     entries = [
         e for e in entries
@@ -268,7 +268,7 @@ def main():
     parser.add_argument("--step", type=int, default=None,
                         help="Only evaluate checkpoints whose iter is divisible by STEP "
                              "(e.g. --step 5000 evaluates at 5k, 10k, 15k, 20k). "
-                             "ckpt_best.pt / ckpt.pt (iter from filename unknown) always included.")
+                             "weights_best.pt / ckpt.pt (iter from filename unknown) always included.")
     parser.add_argument("--keep", action="store_true",
                         help="Keep downloaded checkpoints on disk (default: delete after eval)")
     parser.add_argument("--skip-existing", action="store_true", default=True,

@@ -33,6 +33,14 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **2026-04-30:** Resuming cloud training runs: `launch.py --resume` pulls `checkpoints/` from R2 and runs `train.py --init_from=resume` (resume from `out_dir/ckpt.pt`). To continue a finished run (e.g. v2 stopped at 150k but val loss still falling), bump `max_iters` / `lr_decay_iters` above the prior stop and relaunch on Vast with `--resume`.
 
+- **2026-04-30:** Vast offer selection now accounts for **bandwidth costs**: `launch.py` surfaces `inet_up_cost` / `inet_down_cost` ($/GB) in the offer list and computes an estimated **all-in $/hr** using `--up-gb-per-hr` / `--down-gb-per-hr`, with optional filters `--max-inet-up-cost` / `--max-inet-down-cost`.
+
+- **2026-04-30:** Reduced Vast/R2 **egress** by shrinking `ckpt_best.pt`: `patzer/train.py` now saves best checkpoints as **weights-only by default** (no optimizer state) and adds knobs `ckpt_best_min_delta` and `ckpt_best_cooldown_steps` to avoid uploading a new best on every tiny early-training improvement.
+- **2026-04-30:** Checkpoint naming + egress redesign: `patzer/train.py` now writes `ckpt.pt` (resume, full optimizer), plus `weights_best.pt` (best weights for eval), and optional `weights_iter_*.pt` snapshots created by server-side R2 copy on best improvements (rate-limited by `weights_snapshot_interval`). Added `patzer/migrate_r2_checkpoint_names.py` to copy historical `ckpt_best.pt`/`ckpt_*.pt` to the new weights filenames without deleting old keys.
+
 - **2026-04-30:** W&B resume support: `patzer/train.py` now stores `wandb_run_id` inside `ckpt.pt` and uses `wandb.init(..., id=..., resume="must")` on `--init_from=resume`, plus logs with `step=iter_num` so charts continue from the right step instead of starting a new run.
 
+- **2026-04-30:** Resume hardening: `patzer/train.py` now fails with a clear error if `--init_from=resume` is used but `out_dir/ckpt.pt` is missing. `launch.py --resume` now pulls only the config’s `out_dir` prefix from R2 (instead of all `checkpoints/`) and fails fast if `ckpt.pt` is still missing after the pull attempt.
+
 - **2026-04-30:** Eval display-name fix: `eval/tournament.py` and `eval/model_tournament.py` now prefer the **model version** directory (`patzer_v*`) for the `Model` label instead of checkpoint filenames like `ckpt_150000`, so tables show stable model ids with iteration shown separately (or as `_best` when appropriate).
+- **2026-04-30:** `eval/model_tournament.py` aggregate leaderboard: re-derive display tags from `model_a`/`model_b` + `settings.prefix` so **historical** `model_results.json` rows (filename-only keys + old `label_*` strings) show `patzer_v2` + `Iter` (and `patzer_v2_best` for `ckpt_best.pt`) instead of `ckpt_050000.pt@...`.

@@ -3,7 +3,7 @@ R2 push/pull helpers. All functions are no-ops if R2 env vars aren't set.
 
 R2 mirrors local path structure:
   data/prepared/train.bin       ↔  R2: data/prepared/train.bin
-  checkpoints/patzer_v0/ckpt.pt ↔  R2 (latest for resume); ckpt_best.pt ↔ best val weights
+  checkpoints/patzer_v0/ckpt.pt ↔  R2 (latest for resume); weights_best.pt ↔ best val weights
 
 Usage:
   python r2.py push data/prepared          # upload all files in a local dir

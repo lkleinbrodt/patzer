@@ -3,7 +3,7 @@ eval/engine.py
 
 PatzaPlayer: loads a trained GPT checkpoint and generates legal chess moves
 using the model's probability distribution with legal-move masking.
-Use checkpoints/.../ckpt_best.pt for best-val weights (eval defaults); ckpt.pt is latest-for-resume.
+Use checkpoints/.../weights_best.pt for best-val weights (eval defaults); ckpt.pt is latest-for-resume.
 """
 
 import random

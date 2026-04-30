@@ -42,10 +42,18 @@ eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 # Save the "latest" checkpoint (`ckpt.pt`) at most every N steps (0 = every eval).
-# `ckpt_best.pt` is still written whenever val improves.
+# `weights_best.pt` is still written whenever val improves.
 ckpt_save_interval = 0
-# push ckpt_{iter}.pt to R2 every N steps (0 = disabled). This only runs when we saved `ckpt.pt` that step.
-r2_history_ckpt_interval = 5000
+# Best-weights checkpoint save policy (to control bandwidth/egress):
+# - `weights_best.pt` is used for play/eval and does NOT need optimizer state.
+# - It is always weights-only (no optimizer state).
+# Only save `weights_best.pt` if val loss improves by at least this absolute amount.
+ckpt_best_min_delta = 0.0
+# Optional cooldown: only save best at most once every N steps (0 = no cooldown).
+ckpt_best_cooldown_steps = 0
+# Create weights snapshots `weights_iter_*.pt` (weights-only) at most every N steps,
+# but only when a new best is saved. 0 disables snapshots.
+weights_snapshot_interval = 10000
 # Early stopping on val loss (0 = disabled). Counts consecutive evals without val improvement.
 early_stop_patience_evals = 0
 early_stop_min_iters = 0 # require at least this many steps before early stop can trigger
@@ -188,6 +196,11 @@ elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(
+            f"init_from=resume but checkpoint not found at {ckpt_path}. "
+            f"Did you forget to download from R2 (or set R2 env vars)?"
+        )
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -281,6 +294,10 @@ if wandb_log and master_process:
     if init_from == 'resume' and wandb_run_id:
         wandb_init_kwargs.update(id=wandb_run_id, resume="must")
     run = wandb.init(**wandb_init_kwargs)
+    # Make `iter` the canonical x-axis in W&B. This avoids confusion if W&B defaults
+    # charts to "Step" (log call index) instead of the actual training iteration.
+    wandb.define_metric("iter")
+    wandb.define_metric("*", step_metric="iter")
     # Capture id for checkpointing (fresh run or missing id in old checkpoints).
     if not wandb_run_id:
         wandb_run_id = run.id
@@ -325,14 +342,15 @@ while True:
                 "ts": _time.time(),
             }) + "\n")
         r2.push_file(metrics_local, f"{out_dir}/metrics.jsonl")
-        improved = val_loss < best_val_loss
+        improved = val_loss < (best_val_loss - ckpt_best_min_delta)
         if early_stop_patience_evals > 0:
             if improved:
                 evals_without_improvement = 0
             else:
                 evals_without_improvement += 1
         # Save behavior:
-        # - `ckpt_best.pt` on *any* val improvement
+        # - `weights_best.pt` on val improvement (weights-only; for eval/play)
+        # - optional `weights_iter_*.pt` snapshots created by copying `weights_best.pt` (no extra upload)
         # - `ckpt.pt` ("latest") at most every `ckpt_save_interval` steps (or every eval if interval == 0)
         save_latest = False
         if always_save_checkpoint and iter_num > 0:
@@ -357,14 +375,57 @@ while True:
                     ckpt_local = os.path.join(out_dir, 'ckpt.pt')
                     torch.save(checkpoint, ckpt_local)
                     r2.push_file(ckpt_local)
-                    # optionally push a stamped copy so R2 preserves some history
-                    if r2_history_ckpt_interval and (iter_num % r2_history_ckpt_interval == 0):
-                        r2.push_file(ckpt_local, f"{out_dir}/ckpt_{iter_num:06d}.pt")
                 if improved:
-                    # Best val weights only (for play/eval); latest resume checkpoint is `ckpt.pt`.
-                    best_ckpt_local = os.path.join(out_dir, 'ckpt_best.pt')
-                    torch.save(checkpoint, best_ckpt_local)
-                    r2.push_file(best_ckpt_local)
+                    # Best val checkpoint is for play/eval; keep it small (weights-only) to reduce R2 egress.
+                    can_save_best = True
+                    if ckpt_best_cooldown_steps and (iter_num % eval_interval == 0):
+                        # cooldown expressed in steps; if non-zero, enforce at most one best save per window
+                        # by checking the last saved iter in the existing file (if present).
+                        best_weights_local = os.path.join(out_dir, 'weights_best.pt')
+                        if os.path.exists(best_weights_local):
+                            try:
+                                prev = torch.load(best_weights_local, map_location='cpu')
+                                prev_it = int(prev.get('iter_num', -10**18))
+                                if (iter_num - prev_it) < ckpt_best_cooldown_steps:
+                                    can_save_best = False
+                            except Exception:
+                                pass
+
+                    if can_save_best:
+                        best_weights_local = os.path.join(out_dir, 'weights_best.pt')
+                        best_weights = {
+                            'model': checkpoint['model'],
+                            'model_args': checkpoint['model_args'],
+                            'iter_num': checkpoint['iter_num'],
+                            'val_loss': checkpoint['val_loss'],
+                            'best_val_loss': checkpoint['best_val_loss'],
+                            'config': checkpoint['config'],
+                        }
+                        torch.save(best_weights, best_weights_local)
+                        pushed_best = r2.push_file(best_weights_local)
+
+                        # Optionally create a rate-limited weights snapshot on improvement.
+                        if weights_snapshot_interval and pushed_best:
+                            try:
+                                import re as _re
+                                from pathlib import Path as _Path
+
+                                outp = _Path(out_dir)
+                                last_it = None
+                                for p in outp.glob("weights_iter_*.pt"):
+                                    m = _re.match(r"weights_iter_(\d{6,})\.pt$", p.name)
+                                    if m:
+                                        try:
+                                            it = int(m.group(1))
+                                            last_it = it if (last_it is None or it > last_it) else last_it
+                                        except ValueError:
+                                            pass
+                                if last_it is None or (iter_num - last_it) >= int(weights_snapshot_interval):
+                                    snap_key = f"{out_dir}/weights_iter_{iter_num:06d}.pt"
+                                    # Server-side copy avoids re-uploading.
+                                    r2.copy_object(f"{out_dir}/weights_best.pt", snap_key, overwrite=False)
+                            except Exception:
+                                pass
     if ddp and iter_num % eval_interval == 0:
         sync = torch.tensor([evals_without_improvement], dtype=torch.int, device=device)
         broadcast(sync, src=0)

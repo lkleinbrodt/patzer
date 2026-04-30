@@ -2,7 +2,7 @@
 eval/play_gui.py — Play a game against Patzer in a pygame window.
 
 Usage:
-    python eval/play_gui.py --checkpoint checkpoints/patzer_v1/ckpt_best.pt
+    python eval/play_gui.py --checkpoint checkpoints/patzer_v1/weights_best.pt
     python eval/play_gui.py --checkpoint ... --color black --device cpu
 """
 

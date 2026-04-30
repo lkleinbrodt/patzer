@@ -9,8 +9,8 @@ Usage:
     # Run an adaptive ELO tournament (default checkpoint auto-picked):
     python eval/tournament.py --stockfish /opt/homebrew/bin/stockfish
 
-    # Or pick a specific checkpoint (prefer ckpt_best.pt for play/eval):
-    python eval/tournament.py --checkpoint checkpoints/patzer_v2/ckpt_best.pt
+    # Or pick a specific checkpoint (prefer weights_best.pt for play/eval):
+    python eval/tournament.py --checkpoint checkpoints/patzer_v2/weights_best.pt
 
     # Print accumulated results:
     python eval/tournament.py --show
@@ -37,7 +37,7 @@ RESULTS_FILE = Path(__file__).parent / "results.json"
 def _checkpoint_label(checkpoint: str) -> str:
     """
     Human-friendly model id for display.
-    - checkpoints/patzer_v1/ckpt_best.pt -> patzer_v1
+    - checkpoints/patzer_v1/weights_best.pt -> patzer_v1
     - checkpoints/patzer_v1/ckpt.pt -> patzer_v1
     - checkpoints/patzer_v2/ckpt_150000.pt -> patzer_v2
     - otherwise fall back to path stem/name.
@@ -56,7 +56,7 @@ def _checkpoint_label(checkpoint: str) -> str:
 def _latest_local_checkpoint_file(checkpoints_dir: Path) -> Path | None:
     """
     Pick the latest local checkpoint assuming directories like checkpoints/patzer_vX/.
-    Prefers ckpt_best.pt (best val); falls back to ckpt.pt for older runs.
+    Prefers weights_best.pt (best weights for eval/play); falls back to ckpt_best.pt then ckpt.pt.
     """
     best_v: int | None = None
     best_dir: Path | None = None
@@ -74,7 +74,7 @@ def _latest_local_checkpoint_file(checkpoints_dir: Path) -> Path | None:
     if best_dir is None:
         return None
 
-    for name in ("ckpt_best.pt", "ckpt.pt"):
+    for name in ("weights_best.pt", "ckpt_best.pt", "ckpt.pt"):
         path = best_dir / name
         if path.is_file():
             return path
@@ -635,7 +635,7 @@ def main():
         "--checkpoint",
         help=(
             "Path to checkpoint (local file or R2 key). "
-            "If omitted, uses latest local checkpoints/patzer_vX/ckpt_best.pt (or ckpt.pt)"
+            "If omitted, uses latest local checkpoints/patzer_vX/weights_best.pt (or ckpt_best.pt/ckpt.pt)"
         ),
     )
     parser.add_argument("--pull-r2", action="store_true", help="Download checkpoint from R2 first")
@@ -683,7 +683,7 @@ def main():
         if ckpt_auto is None:
             parser.error(
                 "--checkpoint not provided and no local checkpoints found at "
-                f"{checkpoints_dir}/patzer_vX/ckpt_best.pt (or ckpt.pt)"
+                f"{checkpoints_dir}/patzer_vX/weights_best.pt (or ckpt_best.pt/ckpt.pt)"
             )
         args.checkpoint = str(ckpt_auto)
         print(f"[default] using local checkpoint {args.checkpoint} (@eval/tournament.py)")

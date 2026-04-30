@@ -26,7 +26,7 @@ How to run (from repo root, venv active):
       --prefix checkpoints/patzer_v2 \\
       --list
 
-  # v1 best vs v2 best only (one ckpt_best.pt per prefix)
+  # v1 best vs v2 best only (one weights_best.pt per prefix)
   .venv/bin/python eval/model_tournament.py \\
       --prefix checkpoints/patzer_v1 \\
       --prefix checkpoints/patzer_v2 \\
@@ -53,6 +53,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -164,11 +165,16 @@ def _list_r2_checkpoints(prefix: str) -> list[R2Checkpoint]:
                 continue
             filename = Path(key).name
             iter_hint = None
-            # ckpt_005000.pt → 5000
-            if filename.startswith("ckpt_") and filename.endswith(".pt"):
-                tail = filename.removesuffix(".pt").removeprefix("ckpt_")
-                if tail.isdigit():
-                    iter_hint = int(tail)
+            # ckpt_005000.pt / weights_iter_005000.pt → 5000
+            if filename.endswith(".pt"):
+                if filename.startswith("ckpt_"):
+                    tail = filename.removesuffix(".pt").removeprefix("ckpt_")
+                    if tail.isdigit():
+                        iter_hint = int(tail)
+                elif filename.startswith("weights_iter_"):
+                    tail = filename.removesuffix(".pt").removeprefix("weights_iter_")
+                    if tail.isdigit():
+                        iter_hint = int(tail)
             etag = obj.get("ETag")
             # boto3 ETag often includes quotes
             if isinstance(etag, str):
@@ -188,8 +194,12 @@ def _list_r2_checkpoints(prefix: str) -> list[R2Checkpoint]:
                 )
             )
 
-    # Prefer ckpt_best.pt over ckpt.pt if both exist in the same dir.
-    parents_with_best = {str(Path(e.r2_key).parent) for e in out if e.filename == "ckpt_best.pt"}
+    # Prefer weights_best.pt / ckpt_best.pt over ckpt.pt if both exist in the same dir.
+    parents_with_best = {
+        str(Path(e.r2_key).parent)
+        for e in out
+        if e.filename in ("weights_best.pt", "ckpt_best.pt")
+    }
     out = [
         e
         for e in out
@@ -197,7 +207,7 @@ def _list_r2_checkpoints(prefix: str) -> list[R2Checkpoint]:
     ]
 
     def sort_key(e: R2Checkpoint):
-        if e.filename == "ckpt_best.pt":
+        if e.filename in ("weights_best.pt", "ckpt_best.pt"):
             return (-1, -1)
         if e.iter_hint is not None:
             return (0, e.iter_hint)
@@ -230,8 +240,8 @@ def _ensure_local_checkpoint(entry: R2Checkpoint, force_refresh_best: bool = Tru
     """
     Ensure a checkpoint exists locally at path == r2_key.
 
-    - For ckpt_best.pt: re-download if ETag differs (default).
-    - For numbered ckpt_*.pt: skip download if file exists and (size matches if available).
+    - For weights_best.pt / ckpt_best.pt: re-download if ETag differs (default).
+    - For numbered weights_iter_*.pt / ckpt_*.pt: skip download if file exists and (size matches if available).
     """
     local_path = Path(entry.r2_key)
     need = not local_path.exists()
@@ -245,8 +255,8 @@ def _ensure_local_checkpoint(entry: R2Checkpoint, force_refresh_best: bool = Tru
             except OSError:
                 need = True
 
-        # ckpt_best can change while name stays same.
-        if not need and force_refresh_best and entry.filename == "ckpt_best.pt":
+        # Best can change while name stays same.
+        if not need and force_refresh_best and entry.filename in ("weights_best.pt", "ckpt_best.pt"):
             meta = _load_local_meta(local_path) or {}
             if meta.get("etag") and entry.etag and meta.get("etag") != entry.etag:
                 need = True
@@ -453,14 +463,93 @@ def save_model_results(records: list[dict]) -> None:
 
 
 def _format_label(key: str) -> str:
+    """
+    Short stable tag from a checkpoint path/key.
+
+    Examples:
+      checkpoints/patzer_v2/weights_iter_050000.pt -> patzer_v2_050000
+      checkpoints/patzer_v2/weights_best.pt        -> patzer_v2_best
+      checkpoints/patzer_v2/ckpt.pt                -> patzer_v2_latest
+
+    Bare filenames (historical JSON rows) fall back to the stem unless callers
+    reconstruct a full path via `_checkpoint_candidates_for_bucket()` first.
+    """
     p = Path(key)
-    # Prefer stable "model version" labels over checkpoint filenames.
-    # Iteration is displayed separately (we append "@{iter_num}" elsewhere).
-    if p.suffix == ".pt" and p.parent.name and p.parent.name.startswith("patzer_v") and p.name.startswith("ckpt"):
-        if p.name == "ckpt_best.pt":
-            return f"{p.parent.name}_best"
-        return p.parent.name
-    return p.name or key
+    if not (p.suffix == ".pt" and (p.name.startswith("ckpt") or p.name.startswith("weights_"))):
+        return p.name or key
+
+    version = None
+    if p.parent.name and p.parent.name.startswith("patzer_v"):
+        version = p.parent.name
+
+    if version is None:
+        return p.stem
+
+    if p.name in ("weights_best.pt", "ckpt_best.pt"):
+        return f"{version}_best"
+    if p.name == "ckpt.pt":
+        return f"{version}_latest"
+    if p.name.endswith(".pt"):
+        if p.name.startswith("weights_iter_"):
+            tail = p.name.removeprefix("weights_iter_").removesuffix(".pt")
+            if tail.isdigit():
+                return f"{version}_{tail}"
+        if p.name.startswith("ckpt_"):
+            tail = p.name.removeprefix("ckpt_").removesuffix(".pt")
+            if tail.isdigit():
+                return f"{version}_{tail}"
+    return p.stem
+
+
+def _normalize_bucket_prefix_field(prefix_field: str | None) -> list[str]:
+    if not prefix_field:
+        return []
+    out: list[str] = []
+    for part in str(prefix_field).split("|"):
+        p = _resolve_checkpoint_prefix(part)
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def _checkpoint_candidates_for_bucket(raw_key: str, bucket_prefixes: list[str]) -> list[str]:
+    """
+    Some older `model_results.json` rows only store a filename (e.g. ckpt_050000.pt).
+    If the aggregation bucket is tied to one or more R2 roots, prefix them.
+    """
+    p = Path(raw_key)
+    if p.parent != Path(".") and str(p.parent) not in (".", ""):
+        return [str(p).replace("\\", "/")]
+
+    if len(bucket_prefixes) == 1:
+        return [f"{bucket_prefixes[0].rstrip('/')}/{p.name}"]
+
+    return [f"{pfx.rstrip('/')}/{p.name}" for pfx in bucket_prefixes]
+
+
+def _label_for_player(
+    raw_key: str,
+    iter_num: int | None,
+    bucket_prefixes: list[str] | None = None,
+) -> str:
+    """
+    Full display string: version + disambiguation from filename; iter when needed.
+    """
+    pfxs = bucket_prefixes or []
+    candidates = _checkpoint_candidates_for_bucket(raw_key, pfxs)
+    tags = [_format_label(c) for c in candidates]
+    uniq = sorted(set(tags), key=lambda s: (len(s), s))
+    base = uniq[0] if uniq else (_format_label(raw_key))
+
+    if iter_num is None:
+        return base
+
+    # If tag already encodes this iter (e.g. patzer_v2_150000), don't repeat.
+    if base.endswith(f"_{iter_num}") or base.endswith("_best") or base.endswith("_latest"):
+        return base
+    if f"_{iter_num}" in base:
+        return base
+    return f"{base}@{iter_num}"
 
 
 # ── Aggregation: combine results across runs sharing the same settings bucket ─
@@ -497,6 +586,10 @@ def _aggregate_pair_results(
     Sum W/L/D per ordered (model_a, model_b, iter_a, iter_b) across all matching records.
     If `bucket` is provided, only records in that aggregation bucket are counted.
     """
+    bucket_prefixes: list[str] = []
+    if bucket is not None and bucket[0] is not None:
+        bucket_prefixes = _normalize_bucket_prefix_field(str(bucket[0]))
+
     pairs: dict[tuple, dict] = {}
     for r in records:
         if bucket is not None and _settings_bucket(r) != bucket:
@@ -516,8 +609,10 @@ def _aggregate_pair_results(
                 "L": 0,
                 "D": 0,
                 "games": 0,
-                "label_a": r.get("label_a", _format_label(r["model_a"])),
-                "label_b": r.get("label_b", _format_label(r["model_b"])),
+                # Always derive labels from checkpoint ids + bucket prefixes so formatting improvements
+                # apply to historical rows (older JSON stored less-friendly labels).
+                "label_a": _label_for_player(r["model_a"], r.get("iter_a"), bucket_prefixes),
+                "label_b": _label_for_player(r["model_b"], r.get("iter_b"), bucket_prefixes),
                 "iter_a": r.get("iter_a"),
                 "iter_b": r.get("iter_b"),
             },
@@ -611,6 +706,8 @@ def _print_aggregated_leaderboard(
     bucket: tuple,
     label_overrides: dict[tuple[str, int | None], str] | None = None,
 ) -> None:
+    bucket_prefixes = _normalize_bucket_prefix_field(str(bucket[0])) if bucket and bucket[0] else []
+
     pairs = _aggregate_pair_results(records, bucket=bucket)
     if not pairs:
         print(f"[aggregate] no records found for bucket: {_bucket_label(bucket)}")
@@ -631,32 +728,50 @@ def _print_aggregated_leaderboard(
         slot_b["score"] += float(c["L"]) + 0.5 * float(c["D"])
 
     rows = []
-    for player, rating in ratings.items():
-        info = per_player.get(player, {"games": 0, "score": 0.0, "label": None})
-        label = (label_overrides or {}).get(player) or info.get("label") or _format_label(player[0])
-        if player[1] is not None and "@" not in label:
-            label = f"{label}@{player[1]}"
+    for player_key, rating in ratings.items():
+        info = per_player.get(player_key, {"games": 0, "score": 0.0, "label": None})
+        raw_label = (label_overrides or {}).get(player_key) or info.get(
+            "label"
+        ) or _label_for_player(player_key[0], player_key[1], bucket_prefixes)
+        it = "" if player_key[1] is None else str(int(player_key[1]))
+        if "@" in raw_label:
+            model_col, _, it_rest = raw_label.partition("@")
+            if not it and it_rest:
+                it = it_rest
+        else:
+            model_col = raw_label
+
+        # If we're printing a separate Iter column, drop redundant trailing _{iter} from the tag.
+        if it:
+            m = re.fullmatch(r"(patzer_v\d+)_(\d+)", model_col)
+            if m:
+                try:
+                    if int(m.group(2)) == int(it):
+                        model_col = m.group(1)
+                except ValueError:
+                    pass
+
         games = int(info["games"])
         pct = (info["score"] / games * 100.0) if games else 0.0
-        rows.append((rating, label, player, games, pct))
+        rows.append((rating, model_col, it, player_key, games, pct))
 
     rows.sort(key=lambda r: r[0], reverse=True)
     print(f"\n[aggregate-leaderboard] bucket: {_bucket_label(bucket)}")
-    print(f"  {'Elo':>7}  {'Model':<36}  {'Games':>6}  {'Score%':>6}")
-    for rating, label, player, games, pct in rows:
-        print(f"  {rating:7.1f}  {label:<36}  {games:>6d}  {pct:>5.1f}%")
+    print(f"  {'Elo':>7}  {'Model':<28} {'Iter':>8}  {'Games':>6}  {'Score%':>6}")
+    for rating, model_col, it, player, games, pct in rows:
+        print(f"  {rating:7.1f}  {model_col:<28} {it:>8}  {games:>6d}  {pct:>5.1f}%")
 
 
 def _choose_evenly_spaced(entries: list[R2Checkpoint], n: int) -> list[R2Checkpoint]:
     """
     Pick n entries with preference:
-      - always include ckpt_best.pt if present
-      - among numbered ckpt_*.pt, choose evenly across iteration range
+      - always include weights_best.pt (or ckpt_best.pt) if present
+      - among numbered weights_iter_*.pt / ckpt_*.pt, choose evenly across iteration range
       - if still short, include ckpt.pt
     """
     if n <= 0:
         return []
-    best = [e for e in entries if e.filename == "ckpt_best.pt"]
+    best = [e for e in entries if e.filename in ("weights_best.pt", "ckpt_best.pt")]
     numbered = [e for e in entries if e.iter_hint is not None]
     latest = [e for e in entries if e.filename == "ckpt.pt"]
 
@@ -756,10 +871,12 @@ def _choose_evenly_spaced_multi(
 def _pick_ckpt_best_per_prefix(ordered: list[tuple[str, list[R2Checkpoint]]]) -> list[R2Checkpoint]:
     out: list[R2Checkpoint] = []
     for pfx, es in ordered:
-        best = next((e for e in es if e.filename == "ckpt_best.pt"), None)
+        best = next((e for e in es if e.filename == "weights_best.pt"), None) or next(
+            (e for e in es if e.filename == "ckpt_best.pt"), None
+        )
         if best is None:
             raise SystemExit(
-                f"No ckpt_best.pt found under R2 prefix {pfx!r}. "
+                f"No weights_best.pt/ckpt_best.pt found under R2 prefix {pfx!r}. "
                 "Upload best weights or pick checkpoints with --indices / manual selection."
             )
         out.append(best)
@@ -779,7 +896,11 @@ def _interactive_select_catalog(prefixes: list[str]) -> list[R2Checkpoint]:
             print(f"\n--- {tag} ---")
             prev_tag = tag
         hint = "" if e.iter_hint is None else f"iter~{e.iter_hint}"
-        ftag = "best" if e.filename == "ckpt_best.pt" else ("latest" if e.filename == "ckpt.pt" else "ckpt")
+        ftag = (
+            "best"
+            if e.filename in ("weights_best.pt", "ckpt_best.pt")
+            else ("latest" if e.filename == "ckpt.pt" else "iter")
+        )
         lm = e.last_modified or "?"
         sz = f"{(e.size/1e6):.1f}MB" if e.size else "?"
         print(f"  [{i:2d}] {ftag:<6} {hint:<10} {sz:>8}  {lm:<24}  {e.r2_key}")
@@ -845,7 +966,7 @@ def main() -> None:
     parser.add_argument(
         "--cross-best",
         action="store_true",
-        help="Select ckpt_best.pt from every --prefix (e.g. v1 best vs v2 best)",
+        help="Select weights_best.pt (or ckpt_best.pt) from every --prefix (e.g. v1 best vs v2 best)",
     )
     parser.add_argument("--device", default="mps", help="torch device: cpu | mps | cuda")
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -919,7 +1040,7 @@ def main() -> None:
     picked: list[R2Checkpoint]
     if args.cross_best:
         picked = _pick_ckpt_best_per_prefix(ordered)
-        print(f"[select] --cross-best: picked {len(picked)} ckpt_best.pt (one per prefix)")
+        print(f"[select] --cross-best: picked {len(picked)} best checkpoints (one per prefix)")
         for e in picked:
             print(f"  - {e.r2_key}")
     elif args.indices:
@@ -964,6 +1085,9 @@ def main() -> None:
     for e in picked:
         local_paths.append(_ensure_local_checkpoint(e, force_refresh_best=True))
 
+    settings_prefix = _canonical_run_prefixes(prefixes)
+    bucket_prefixes_run = _normalize_bucket_prefix_field(settings_prefix)
+
     # Build ModelSpecs with iter numbers (read from checkpoint).
     specs: list[ModelSpec] = []
     for e, lp in zip(picked, local_paths):
@@ -973,12 +1097,16 @@ def main() -> None:
                 checkpoint_key=e.r2_key,
                 local_path=lp,
                 iter_num=it,
-                label=_format_label(e.r2_key) + f"@{it}",
+                label=_label_for_player(e.r2_key, it, bucket_prefixes_run),
             )
         )
 
     def _choose_baseline(specs_in: list[ModelSpec]) -> ModelSpec:
-        bests = [s for s in specs_in if Path(s.checkpoint_key).name == "ckpt_best.pt"]
+        bests = [
+            s
+            for s in specs_in
+            if Path(s.checkpoint_key).name in ("weights_best.pt", "ckpt_best.pt")
+        ]
         if len(bests) == 1:
             return bests[0]
         if len(bests) > 1:
@@ -1005,7 +1133,7 @@ def main() -> None:
     rng = random.Random(int(args.seed))
     now = datetime.now(timezone.utc).isoformat()
     settings = {
-        "prefix": _canonical_run_prefixes(prefixes),
+        "prefix": settings_prefix,
         "prefixes": list(prefixes),
         "temperature": args.temperature,
         "top_k": args.top_k,

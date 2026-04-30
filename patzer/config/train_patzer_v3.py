@@ -21,6 +21,7 @@ always_save_checkpoint = True
 early_stop_patience_evals = 15
 early_stop_min_iters = 10000
 ckpt_save_interval = 10000
+weights_snapshot_interval = 10000
 
 wandb_log = True
 wandb_project = 'patzer'

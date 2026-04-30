@@ -14,6 +14,7 @@ python launch.py --max-price 0.30
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -99,11 +100,20 @@ def build_script(
     terminate_on_error: bool = False,
     wandb_run_id: str | None = None,
 ) -> str:
-    pull_ckpt = (
-        f"python -c \"import sys; sys.path.insert(0,'patzer'); import r2; "
-        f"r2.pull_dir('checkpoints', 'checkpoints')\" || true"
-        if resume else ""
-    )
+    cfg = _read_train_config_vars(config)
+    out_dir = str(cfg.get("out_dir") or "").strip()
+    # For resume we only need the full optimizer checkpoint (`ckpt.pt`).
+    # We optionally pull `weights_best.pt` + `metrics.jsonl` for convenience/debugging.
+    pull_ckpt = ""
+    if resume and out_dir:
+        pull_ckpt = "\n".join([
+            f"python -c \"import r2; r2.pull_file('{out_dir}/ckpt.pt')\" || true",
+            f"python -c \"import r2; r2.pull_file('{out_dir}/weights_best.pt')\" || true",
+            f"python -c \"import r2; r2.pull_file('{out_dir}/metrics.jsonl')\" || true",
+        ])
+    elif resume:
+        # Fallback if out_dir couldn't be parsed (should be rare): pull all checkpoints.
+        pull_ckpt = "python -c \"import r2; r2.pull_dir('checkpoints', 'checkpoints')\" || true"
     resume_flag = "--init_from=resume" if resume else ""
     wandb_resume_flag = f"--wandb_run_id={wandb_run_id}" if (wandb_run_id and resume) else ""
 
@@ -176,18 +186,144 @@ trap _on_exit EXIT"""
         trap,
         "cd patzer",
         pull_ckpt,
+        (
+            f"if [ ! -f '{out_dir}/ckpt.pt' ]; then "
+            f"echo \"[fatal] --resume requested but missing {out_dir}/ckpt.pt (R2 pull may have failed).\"; "
+            f"exit 2; "
+            f"fi"
+            if resume and out_dir
+            else ""
+        ),
         f'_notify "Patzer: training started" "Config: {config}  Instance: ${{CONTAINER_ID:-unknown}}" "default"',
         f"python -u train.py config/{config}.py {resume_flag} {wandb_resume_flag} 2>&1 | tee /workspace/train.log".strip(),
     ]))
 
 
 def print_offers(offers):
-    print(f"\n  {'#':>3}  {'GPU':<28} {'VRAM':>6} {'$/hr':>6} {'Reliability':>11}  {'ID':>10}")
-    print("  " + "-" * 68)
+    def fmt_money(x: float | None, width: int = 7) -> str:
+        if x is None:
+            return " " * (width - 1) + "?"
+        return f"{x:>{width}.3f}"
+
+    def fmt_cost(x: float | None, width: int = 8) -> str:
+        if x is None:
+            return " " * (width - 1) + "?"
+        return f"{x:>{width}.4f}"
+
+    print(
+        f"\n  {'#':>3}  {'GPU':<28} {'VRAM':>6} {'Base$/hr':>8} {'All-in$/hr':>9} "
+        f"{'Up$/GB':>7} {'Dn$/GB':>7} {'Reliability':>11}  {'ID':>10}"
+    )
+    print("  " + "-" * 104)
     for i, o in enumerate(offers):
-        vram_gb = int(o['gpu_ram']) // 1024
-        print(f"  {i+1:>3}  {o['gpu_name']:<28} {vram_gb:>5}G "
-              f"{o['dph_total']:>6.3f}  {o['reliability2']:>11.3f}  {o['id']:>10}")
+        vram_gb = int(o["gpu_ram"]) // 1024
+        base = o.get("dph_total")
+        up = o.get("inet_up_cost")
+        dn = o.get("inet_down_cost")
+        all_in = o.get("_all_in_dph")
+        rel = o.get("reliability2")
+        print(
+            f"  {i+1:>3}  {o['gpu_name']:<28} {vram_gb:>5}G "
+            f"{fmt_money(base, 8)} {fmt_money(all_in, 9)} "
+            f"{fmt_cost(up, 7)} {fmt_cost(dn, 7)} "
+            f"{(rel if rel is not None else 0):>11.3f}  {o['id']:>10}"
+        )
+
+
+def _offer_all_in_dph(
+    offer: dict,
+    *,
+    up_gb_per_hr: float,
+    down_gb_per_hr: float,
+) -> float:
+    """Estimate $/hr including expected network transfer costs.
+
+    Vast exposes inet_up_cost/inet_down_cost in $/GB.
+    """
+    base = float(offer.get("dph_total") or 0.0)
+    up_cost = float(offer.get("inet_up_cost") or 0.0)
+    dn_cost = float(offer.get("inet_down_cost") or 0.0)
+    return base + up_cost * up_gb_per_hr + dn_cost * down_gb_per_hr
+
+
+def _read_train_config_vars(config_name: str) -> dict:
+    """
+    Best-effort parse of `patzer/config/{config_name}.py` to extract simple constants.
+    Avoids importing/execing arbitrary config code.
+    """
+    cfg_path = Path(__file__).parent / "patzer" / "config" / f"{config_name}.py"
+    if not cfg_path.exists():
+        return {}
+    txt = cfg_path.read_text()
+
+    out: dict[str, object] = {}
+    m = re.search(r"(?m)^\s*out_dir\s*=\s*['\"]([^'\"]+)['\"]\s*$", txt)
+    if m:
+        out["out_dir"] = m.group(1).strip()
+    m = re.search(r"(?m)^\s*eval_interval\s*=\s*(\d+)\s*$", txt)
+    if m:
+        out["eval_interval"] = int(m.group(1))
+    m = re.search(r"(?m)^\s*always_save_checkpoint\s*=\s*(True|False)\s*$", txt)
+    if m:
+        out["always_save_checkpoint"] = (m.group(1) == "True")
+    return out
+
+
+def _estimate_bandwidth_gb_per_hr(
+    *,
+    config_name: str,
+    mins_per_1k_steps: float,
+    ckpt_gb: float,
+    improve_rate_per_eval: float,
+    training_data_gb: float,
+    amortize_download_over_hours: float,
+    down_gb_per_hr_override: float | None,
+    up_gb_per_hr_override: float | None,
+) -> tuple[float, float, dict]:
+    """
+    Estimate upload/download GB/hr for Vast bandwidth costing.
+
+    Defaults are calibrated to our observed v3 behavior:
+    - 7 min / 1k steps
+    - eval_interval=1000
+    - improvement rate ≈ 0.861 per eval (from W&B export)
+    - ckpt_best checkpoint ≈ 0.5 GB
+
+    We assume `always_save_checkpoint=True` => 1 checkpoint save per eval, plus
+    a best-checkpoint save with probability=improve_rate_per_eval.
+    """
+    if up_gb_per_hr_override is not None:
+        up = max(0.0, float(up_gb_per_hr_override))
+    else:
+        cfg = _read_train_config_vars(config_name)
+        eval_interval = int(cfg.get("eval_interval") or 1000)
+        always_save = bool(cfg.get("always_save_checkpoint") if "always_save_checkpoint" in cfg else True)
+
+        steps_per_hr = 60.0 * 1000.0 / max(1e-9, float(mins_per_1k_steps))
+        evals_per_hr = steps_per_hr / float(eval_interval)
+
+        saves_per_eval = (1.0 if always_save else 0.0) + max(0.0, float(improve_rate_per_eval))
+        up = float(ckpt_gb) * evals_per_hr * saves_per_eval
+
+    if down_gb_per_hr_override is not None:
+        down = max(0.0, float(down_gb_per_hr_override))
+    else:
+        denom = float(amortize_download_over_hours)
+        down = float(training_data_gb) / denom if denom > 0 else 0.0
+
+    meta = {
+        "mins_per_1k_steps": float(mins_per_1k_steps),
+        "ckpt_gb": float(ckpt_gb),
+        "improve_rate_per_eval": float(improve_rate_per_eval),
+        "training_data_gb": float(training_data_gb),
+        "amortize_download_over_hours": float(amortize_download_over_hours),
+        "config_vars": _read_train_config_vars(config_name),
+        "used_overrides": {
+            "up_gb_per_hr": up_gb_per_hr_override is not None,
+            "down_gb_per_hr": down_gb_per_hr_override is not None,
+        },
+    }
+    return up, down, meta
 
 
 def list_instances():
@@ -324,12 +460,74 @@ def main():
                         help="Min GPU VRAM in GB (default: 8)")
     parser.add_argument("--max-price", type=float, default=0.60,
                         help="Max $/hr (default: 0.60)")
+    parser.add_argument(
+        "--up-gb-per-hr",
+        type=float,
+        default=None,
+        help="Override expected upload volume (GB/hr) for all-in $/hr (default: auto-estimate)",
+    )
+    parser.add_argument(
+        "--down-gb-per-hr",
+        type=float,
+        default=None,
+        help="Override expected download volume (GB/hr) for all-in $/hr (default: amortized training data download)",
+    )
+    parser.add_argument(
+        "--ckpt-gb",
+        type=float,
+        default=0.5,
+        help="Checkpoint size in GB used for bandwidth estimate (default: 0.5)",
+    )
+    parser.add_argument(
+        "--mins-per-1k-steps",
+        type=float,
+        default=7.0,
+        help="Training speed in minutes per 1000 steps (default: 7.0)",
+    )
+    parser.add_argument(
+        "--improve-rate-per-eval",
+        type=float,
+        default=0.861,
+        help="Probability an eval is a new best (default: 0.861 from recent v3 run)",
+    )
+    parser.add_argument(
+        "--training-data-gb",
+        type=float,
+        default=1.0,
+        help="One-time training data download size in GB (default: 1.0)",
+    )
+    parser.add_argument(
+        "--amortize-download-over-hours",
+        type=float,
+        default=24.0,
+        help="Amortize training-data download over N hours when estimating down GB/hr (default: 24)",
+    )
+    parser.add_argument(
+        "--max-inet-up-cost",
+        type=float,
+        default=None,
+        help="Filter offers by max upload bandwidth cost ($/GB). Default: no filter.",
+    )
+    parser.add_argument(
+        "--max-inet-down-cost",
+        type=float,
+        default=None,
+        help="Filter offers by max download bandwidth cost ($/GB). Default: no filter.",
+    )
     parser.add_argument("--search-only", action="store_true",
                         help="Print available offers and exit")
     parser.add_argument("--limit", type=int, default=10,
                         help="Number of offers to show (default: 10)")
     parser.add_argument("--interruptible", "-i", action="store_true",
                         help="Use spot/interruptible pricing (~50%% cheaper, can be preempted)")
+    parser.add_argument(
+        "--allow-sliced-gpus",
+        action="store_true",
+        help=(
+            "Allow offers that are 1 GPU from a multi-GPU machine (gpu_frac<1). "
+            "By default we filter to single-GPU machines (gpu_frac=1)."
+        ),
+    )
     parser.add_argument("--terminate-on-error", action="store_true",
                         help="Destroy instance even if training fails (default: keep alive for debugging)")
     args = parser.parse_args()
@@ -354,8 +552,16 @@ def main():
 
     # --- Rent a new instance ---
 
-    query = (f"num_gpus=1 gpu_ram>={args.min_gpu_ram} rentable=true verified=true "
-             f"compute_cap>=750 dph_total<={args.max_price}")
+    query = (
+        f"num_gpus=1 gpu_ram>={args.min_gpu_ram} rentable=true verified=true "
+        f"compute_cap>=750 dph_total<={args.max_price}"
+    )
+    if not args.allow_sliced_gpus:
+        query += " gpu_frac=1"
+    if args.max_inet_up_cost is not None:
+        query += f" inet_up_cost<={args.max_inet_up_cost}"
+    if args.max_inet_down_cost is not None:
+        query += f" inet_down_cost<={args.max_inet_down_cost}"
 
     search_args = ["search", "offers", query, "-o", "dph_total", "--limit", str(args.limit)]
     if args.interruptible:
@@ -368,13 +574,46 @@ def main():
         print("No offers found. Try --max-price, --min-gpu-ram, or --search-only to explore.")
         sys.exit(1)
 
+    # Add an "all-in" $/hr estimate that includes expected bandwidth costs.
+    up_gb_per_hr, down_gb_per_hr, bw_meta = _estimate_bandwidth_gb_per_hr(
+        config_name=args.config,
+        mins_per_1k_steps=args.mins_per_1k_steps,
+        ckpt_gb=args.ckpt_gb,
+        improve_rate_per_eval=args.improve_rate_per_eval,
+        training_data_gb=args.training_data_gb,
+        amortize_download_over_hours=args.amortize_download_over_hours,
+        down_gb_per_hr_override=args.down_gb_per_hr,
+        up_gb_per_hr_override=args.up_gb_per_hr,
+    )
+    cfg_vars = bw_meta.get("config_vars", {}) or {}
+    eval_interval = cfg_vars.get("eval_interval", 1000)
+    always_save = cfg_vars.get("always_save_checkpoint", True)
+    print(
+        f"\nBandwidth assumptions for all-in $/hr:"
+        f"\n  upload: {up_gb_per_hr:.3f} GB/hr  (ckpt_gb={args.ckpt_gb}, improve_rate/eval={args.improve_rate_per_eval:.3f}, "
+        f"mins_per_1k_steps={args.mins_per_1k_steps}, eval_interval={eval_interval}, always_save_checkpoint={always_save})"
+        f"\n  download: {down_gb_per_hr:.3f} GB/hr  (training_data_gb={args.training_data_gb} amortized over {args.amortize_download_over_hours} hr)"
+    )
+
+    for o in offers:
+        o["_all_in_dph"] = _offer_all_in_dph(
+            o,
+            up_gb_per_hr=up_gb_per_hr,
+            down_gb_per_hr=down_gb_per_hr,
+        )
+    offers.sort(key=lambda x: (x.get("_all_in_dph", float("inf")), x.get("dph_total", float("inf"))))
+
     print_offers(offers)
 
     if args.search_only:
         return
 
     best = offers[0]
-    print(f"\nDefault: #{1} — {best['gpu_name']} @ ${best['dph_total']:.3f}/hr  (id={best['id']})")
+    print(
+        f"\nDefault: #{1} — {best['gpu_name']} "
+        f"@ base ${best['dph_total']:.3f}/hr, all-in ${best.get('_all_in_dph', best['dph_total']):.3f}/hr "
+        f"(id={best['id']})"
+    )
     print("Press Enter to use it, type a number to pick a different one, or Ctrl-C to abort.")
     try:
         choice = input("> ").strip()
