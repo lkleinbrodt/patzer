@@ -5,7 +5,7 @@ Minimal UCI wrapper around `eval.engine.Patzer`, so you can use Patzer from any
 GUI that supports UCI engines (Cute Chess, Banksia, Arena, etc.).
 
 Example:
-  python eval/uci_engine.py --checkpoint checkpoints/patzer_v1/ckpt.pt --device mps
+  python eval/uci_engine.py --checkpoint checkpoints/patzer_v1/ckpt_best.pt --device mps
 """
 
 from __future__ import annotations

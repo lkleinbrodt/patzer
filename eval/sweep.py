@@ -45,7 +45,9 @@ def discover_checkpoints(r2_prefix: str) -> list[dict]:
     List all .pt files under r2_prefix in R2, sorted by iter number.
     Returns list of dicts: {r2_key, filename, iter_hint}
     iter_hint is parsed from the filename (e.g. ckpt_005000.pt → 5000).
-    ckpt.pt gets iter_hint=None (actual iter_num comes from the checkpoint itself).
+    ckpt.pt and ckpt_best.pt get iter_hint=None (iter_num is read from the file when needed).
+    If both ckpt.pt and ckpt_best.pt exist under the same directory, ckpt.pt is dropped
+    (best-val snapshot is enough for the sweep tail).
     """
     from patzer.r2 import _client
     client, bucket = _client()
@@ -67,7 +69,20 @@ def discover_checkpoints(r2_prefix: str) -> list[dict]:
         iter_hint = int(m.group(1)) if m else None
         entries.append({"r2_key": key, "filename": fname, "iter_hint": iter_hint})
 
-    # Sort: numbered checkpoints first by number, then ckpt.pt at the end
+    parents_with_best = {
+        str(Path(e["r2_key"]).parent)
+        for e in entries
+        if e["filename"] == "ckpt_best.pt"
+    }
+    entries = [
+        e for e in entries
+        if not (
+            e["filename"] == "ckpt.pt"
+            and str(Path(e["r2_key"]).parent) in parents_with_best
+        )
+    ]
+
+    # Sort: numbered checkpoints first by number, then unnumbered (.pt tail) last
     def sort_key(e):
         return e["iter_hint"] if e["iter_hint"] is not None else float("inf")
 
@@ -253,7 +268,7 @@ def main():
     parser.add_argument("--step", type=int, default=None,
                         help="Only evaluate checkpoints whose iter is divisible by STEP "
                              "(e.g. --step 5000 evaluates at 5k, 10k, 15k, 20k). "
-                             "ckpt.pt is always included regardless.")
+                             "ckpt_best.pt / ckpt.pt (iter from filename unknown) always included.")
     parser.add_argument("--keep", action="store_true",
                         help="Keep downloaded checkpoints on disk (default: delete after eval)")
     parser.add_argument("--skip-existing", action="store_true", default=True,

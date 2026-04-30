@@ -27,7 +27,7 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
+from torch.distributed import init_process_group, destroy_process_group, broadcast
 
 from model import GPTConfig, GPT
 import r2
@@ -42,6 +42,9 @@ eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 r2_history_ckpt_interval = 5000 # push ckpt_{iter}.pt to R2 every N steps (ckpt.pt is still pushed each eval)
+# Early stopping on val loss (0 = disabled). Counts consecutive evals without val improvement.
+early_stop_patience_evals = 0
+early_stop_min_iters = 0 # require at least this many steps before early stop can trigger
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = False # disabled by default
@@ -153,6 +156,7 @@ def get_batch(split):
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
 best_val_loss = 1e9
+evals_without_improvement = 0
 
 meta_path = os.path.join(data_dir, 'meta.json')
 meta_vocab_size = None
@@ -196,6 +200,7 @@ elif init_from == 'resume':
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
+    evals_without_improvement = int(checkpoint.get('evals_without_improvement', 0))
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -304,6 +309,12 @@ while True:
                 "ts": _time.time(),
             }) + "\n")
         r2.push_file(metrics_local, f"{out_dir}/metrics.jsonl")
+        improved = val_loss < best_val_loss
+        if early_stop_patience_evals > 0:
+            if improved:
+                evals_without_improvement = 0
+            else:
+                evals_without_improvement += 1
         if val_loss < best_val_loss or always_save_checkpoint:
             best_val_loss = min(best_val_loss, val_loss)
             if iter_num > 0:
@@ -314,15 +325,25 @@ while True:
                     'iter_num': iter_num,
                     'val_loss': val_loss,
                     'best_val_loss': best_val_loss,
+                    'evals_without_improvement': evals_without_improvement,
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
                 ckpt_local = os.path.join(out_dir, 'ckpt.pt')
                 torch.save(checkpoint, ckpt_local)
                 r2.push_file(ckpt_local)
+                # Best val weights only (for play/eval); ckpt.pt stays latest for resume when always_save_checkpoint.
+                if improved:
+                    best_ckpt_local = os.path.join(out_dir, 'ckpt_best.pt')
+                    torch.save(checkpoint, best_ckpt_local)
+                    r2.push_file(best_ckpt_local)
                 # optionally push a stamped copy so R2 preserves some history across evals
                 if r2_history_ckpt_interval and (iter_num % r2_history_ckpt_interval == 0):
                     r2.push_file(ckpt_local, f"{out_dir}/ckpt_{iter_num:06d}.pt")
+    if ddp and iter_num % eval_interval == 0:
+        sync = torch.tensor([evals_without_improvement], dtype=torch.int, device=device)
+        broadcast(sync, src=0)
+        evals_without_improvement = int(sync.item())
     if iter_num == 0 and eval_only:
         break
 
@@ -369,6 +390,17 @@ while True:
 
     # termination conditions
     if iter_num > max_iters:
+        break
+    if (
+        early_stop_patience_evals > 0
+        and iter_num >= early_stop_min_iters
+        and evals_without_improvement >= early_stop_patience_evals
+    ):
+        if master_process:
+            print(
+                f"early stop: val loss did not improve for {early_stop_patience_evals} evals "
+                f"(eval_interval={eval_interval}), at iter {iter_num}"
+            )
         break
 
 if ddp:

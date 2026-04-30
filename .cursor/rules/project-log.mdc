@@ -1,0 +1,7 @@
+---
+alwaysApply: true
+---
+
+I want to write one (or many) blog posts about this project. So we should keep a running log at ./PROJECT_LOG.md of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
+
+You dont need to update this file with every single thing you do, but every time we wrap up a conversation or meaningful feature change, or we discover something interesting, put it in the project log.

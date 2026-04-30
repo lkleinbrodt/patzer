@@ -136,14 +136,16 @@ Each experiment produces a new model version with a tracked ELO. The goal is to 
 
 **Planned experiments in rough order:**
 
-| Version | Key change | Hypothesis |
+The question your experiments should answer in order is: data quantity → model size → data quality → training signal quality. That's roughly cheapest-to-most-expensive in terms of iteration cost, and it builds on itself cleanly.
+| Version | Key change | One-liner |
 |---|---|---|
-| v1 | Baseline: NanoGPT, UCI moves, 1800+ ELO filter | Establishes floor |
-| v2 | Scale model (50M → bigger) | More parameters = better pattern matching |
-| v3 | Stricter ELO filter (2200+) | Higher quality training games = better moves learned |
-| v4 | ELO conditioning (prepend ELO bin as token) | One model, multiple skill levels |
-| v5 | FEN input instead of move sequences | Explicit board state vs. implicit tracking |
-| v6 | Stockfish-annotated data (ChessBench) | Supervised on best moves, not average human moves |
+| v0 | 10M params, 1M games | POC | 
+| v1 | 12M params, 1-2M games, longer training. | Floor |
+| v2 | 40M params, 3M games, longer training. | Current |
+| v3 | 40M params, 15-30M games | Data scaling — does more data dwarf bigger model? |
+| v4 | 100M+ params, 15-30M games | Model scaling on top of data |
+| v5 | 2200+ ELO filter on same data pipeline | Data quality vs. quantity |
+| v6 | ChessBench / Stockfish annotations | Best-move supervision |
 
 Each version gets a row on the leaderboard. Architecture and training details are recorded for every run.
 

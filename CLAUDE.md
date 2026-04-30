@@ -97,7 +97,7 @@ Lichess .pgn.zst dumps
   → pipeline/prepare.py          (tokenize + split → uint16 binary)
   → data/prepared/train.bin + val.bin + meta.json
   → patzer/train.py              (nanoGPT training loop, memmap batches from .bin files)
-  → checkpoints/patzer_vN/ckpt.pt (+ synced to Cloudflare R2)
+  → checkpoints/patzer_vN/ckpt.pt (+ ckpt_best.pt on val improvement, R2 sync)
 ```
 
 ### Configuration system (`patzer/configurator.py`)
@@ -110,7 +110,7 @@ Vocabulary is built deterministically from all possible UCI move strings (not fr
 Standard nanoGPT (Karpathy): `Block = CausalSelfAttention + MLP`, pre-norm with `LayerNorm`, weight-tied token embeddings and LM head. Flash attention used when PyTorch ≥ 2.0. `GPTConfig` holds all architecture hyperparameters. `GPT.configure_optimizers` applies weight decay only to 2D parameters (matmul weights + embeddings), not biases or layernorm.
 
 ### Training loop (`patzer/train.py`)
-Direct port of nanoGPT. Data loading uses `np.memmap` (recreated each batch to avoid memory leaks). Supports DDP via `torchrun`. Checkpoints save to `out_dir/ckpt.pt` locally and push to R2 after every eval. Also saves stamped copies `ckpt_{iter:06d}.pt` to R2 to preserve history. Eval estimates loss over `eval_iters` batches for both train and val splits.
+Direct port of nanoGPT. Data loading uses `np.memmap` (recreated each batch to avoid memory leaks). Supports DDP via `torchrun`. With `always_save_checkpoint=True`, `ckpt.pt` is the **latest** eval (optimizer + iter for resume). `ckpt_best.pt` is written only when val improves (weights for play/eval). Stamped `ckpt_{iter:06d}.pt` on R2 preserves history. Optional `early_stop_patience_evals` / `early_stop_min_iters` stop when val plateaus. Eval estimates loss over `eval_iters` batches for both train and val splits.
 
 ### R2 storage (`patzer/r2.py`)
 Cloudflare R2 (S3-compatible) is used to persist training data and checkpoints. Mirrors local path structure exactly. All functions are silent no-ops when R2 env vars are unset — safe to run locally without credentials. Required env vars: `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ACCOUNT_ID` (set in `.env`).
@@ -124,5 +124,5 @@ Manages Vast.ai GPU instances via the `vastai` CLI. On new instance creation, bu
 - **Config files** live in `patzer/config/` and are plain Python that reassigns globals. To create a new model version, copy `train_patzer.py` and increment the version.
 - **`device='auto'`** in config files detects cuda → mps → cpu and disables `torch.compile` on non-CUDA devices automatically (see `train.py` lines 83–91).
 - **Data files are gitignored** (`data/*`). All data lives locally or in R2; never commit binary data.
-- **Checkpoint keys**: `model`, `optimizer`, `model_args`, `iter_num`, `best_val_loss`, `config`. When resuming, only architecture args (`n_layer`, `n_head`, `n_embd`, `block_size`, `bias`, `vocab_size`) are forced to match; other hyperparams can change.
+- **Checkpoint keys**: `model`, `optimizer`, `model_args`, `iter_num`, `best_val_loss`, `evals_without_improvement`, `config`. Resume from `ckpt.pt` (latest). Use `ckpt_best.pt` for eval/play (`eval/tournament.py` auto-pick prefers it). When resuming, only architecture args (`n_layer`, `n_head`, `n_embd`, `block_size`, `bias`, `vocab_size`) are forced to match; other hyperparams can change.
 - The `_orig_mod.` prefix stripping in `train.py` and `sample.py` handles state dict keys from `torch.compile`.

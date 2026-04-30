@@ -1,30 +1,16 @@
 """
 eval/tournament.py
 
-Play Patzer (our trained model) against Stockfish at ELO-limited settings
-(recommended) or fixed depths (legacy).
+Play Patzer (our trained model) against Stockfish at ELO-limited settings using
+an adaptive "cold start" Elo estimation loop.
 Results are persisted to eval/results.json so experiments accumulate over time.
 
 Usage:
-    # Run a smart ELO tournament (recommended):
-    python eval/tournament.py \
-        --checkpoint checkpoints/patzer_v0/ckpt.pt \
-        --smart-elo \
-        --games 12 \
-        --stockfish /opt/homebrew/bin/stockfish
+    # Run an adaptive ELO tournament (default checkpoint auto-picked):
+    python eval/tournament.py --stockfish /opt/homebrew/bin/stockfish
 
-    # Run a fixed ELO ladder:
-    python eval/tournament.py \\
-        --checkpoint checkpoints/patzer_v0/ckpt.pt \\
-        --stockfish-elo 1000 1200 1400 1600 1800 \\
-        --games 20 \\
-        --stockfish /opt/homebrew/bin/stockfish \\
-        --conditioning match_color
-
-    # Try different result-conditioning tokens (use a real .pt path; do not use "..."
-    # as the checkpoint — in Fish that expands to ../.. and passes exists() but is not a file):
-    python eval/tournament.py --checkpoint checkpoints/patzer_v0/ckpt.pt \\
-        --depths 1 --games 10 --conditioning none
+    # Or pick a specific checkpoint (prefer ckpt_best.pt for play/eval):
+    python eval/tournament.py --checkpoint checkpoints/patzer_v2/ckpt_best.pt
 
     # Print accumulated results:
     python eval/tournament.py --show
@@ -32,6 +18,7 @@ Usage:
 
 import argparse
 import json
+import math
 import random
 import sys
 from datetime import datetime, timezone
@@ -44,6 +31,49 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from eval.engine import CONDITIONING_OPTIONS, Patzer, StockfishPlayer
 
 RESULTS_FILE = Path(__file__).parent / "results.json"
+
+
+def _checkpoint_label(checkpoint: str) -> str:
+    """
+    Human-friendly model id for display.
+    - checkpoints/patzer_v1/ckpt_best.pt -> patzer_v1
+    - checkpoints/patzer_v1/ckpt.pt -> patzer_v1
+    - otherwise fall back to path stem/name.
+    """
+    p = Path(checkpoint)
+    if p.name in ("ckpt.pt", "ckpt_best.pt") and p.parent.name:
+        return p.parent.name
+    if p.stem:
+        return p.stem
+    return p.name or str(checkpoint)
+
+
+def _latest_local_checkpoint_file(checkpoints_dir: Path) -> Path | None:
+    """
+    Pick the latest local checkpoint assuming directories like checkpoints/patzer_vX/.
+    Prefers ckpt_best.pt (best val); falls back to ckpt.pt for older runs.
+    """
+    best_v: int | None = None
+    best_dir: Path | None = None
+
+    for p in checkpoints_dir.glob("patzer_v*"):
+        if not p.is_dir():
+            continue
+        try:
+            v = int(p.name.removeprefix("patzer_v"))
+        except ValueError:
+            continue
+        if best_v is None or v > best_v:
+            best_v, best_dir = v, p
+
+    if best_dir is None:
+        return None
+
+    for name in ("ckpt_best.pt", "ckpt.pt"):
+        path = best_dir / name
+        if path.is_file():
+            return path
+    return None
 
 
 def play_game(white, black, max_moves: int = 300) -> str:
@@ -88,7 +118,12 @@ def _play_match(patzer, sf, n_games, label) -> tuple[int, int, int]:
 
         result = play_game(white, black)
         color = "W" if patzer_is_white else "B"
-        print(f"  {label} [{game_idx+1}/{n_games}] Patzer={color} → {result}")
+        if result == "1/2-1/2":
+            outcome_tag = "Patzer draw"
+        elif (result == "1-0" and patzer_is_white) or (result == "0-1" and not patzer_is_white):
+            outcome_tag = "Patzer win"
+        else:
+            outcome_tag = "Patzer loss"
 
         if patzer_is_white:
             if result == "1-0":
@@ -104,133 +139,204 @@ def _play_match(patzer, sf, n_games, label) -> tuple[int, int, int]:
                 l += 1
             else:
                 d += 1
+
+        played = game_idx + 1
+        score = (w + 0.5 * d) / played if played else 0.0
+        print(
+            f"  {label} [{played}/{n_games}] Patzer={color} → {result} ({outcome_tag})"
+            f" | running W-L-D={w}-{l}-{d} score={score*100:5.1f}%"
+        )
     return w, l, d
 
 
-def run_tournament(
+def _stockfish_elo_bounds(stockfish_binary: str) -> tuple[int | None, int | None]:
+    """Read Stockfish's UCI_Elo min/max (if exposed by this build)."""
+    import chess.engine
+
+    engine = chess.engine.SimpleEngine.popen_uci(stockfish_binary)
+    try:
+        opt = engine.options.get("UCI_Elo")
+        if opt is None:
+            return None, None
+        return opt.min, opt.max
+    finally:
+        engine.quit()
+
+
+def _elo_expected_score(model_elo: float, stockfish_elo: float) -> float:
+    """Standard Elo expected score (win=1, draw=0.5, loss=0)."""
+    return 1.0 / (1.0 + 10 ** ((stockfish_elo - model_elo) / 400.0))
+
+
+def _result_to_score_perspective_of_patzer(result: str, patzer_is_white: bool) -> float:
+    """Map '1-0'/'0-1'/'1/2-1/2' to Patzer score in [0, 0.5, 1]."""
+    if result == "1/2-1/2":
+        return 0.5
+    if patzer_is_white:
+        return 1.0 if result == "1-0" else 0.0
+    # Patzer is black
+    return 1.0 if result == "0-1" else 0.0
+
+
+def _posterior_grid(
+    grid_min: int,
+    grid_max: int,
+    step: int,
+    prior_mu: float,
+    prior_sigma: float,
+) -> tuple[list[int], list[float]]:
+    xs = list(range(grid_min, grid_max + 1, step))
+    if prior_sigma <= 0:
+        p = [0.0] * len(xs)
+        mid = min(range(len(xs)), key=lambda i: abs(xs[i] - prior_mu))
+        p[mid] = 1.0
+        return xs, p
+    inv2 = 1.0 / (2.0 * prior_sigma * prior_sigma)
+    logp = [-(x - prior_mu) * (x - prior_mu) * inv2 for x in xs]
+    m = max(logp)
+    p = [math.exp(v - m) for v in logp]
+    s = sum(p)
+    return xs, [v / s for v in p]
+
+
+def _posterior_update(xs: list[int], p: list[float], stockfish_elo: int, score: float) -> list[float]:
+    """
+    Update posterior over model Elo after observing a single game score in {0, 0.5, 1}.
+    Uses a Bernoulli-style likelihood with fractional score (draw -> sqrt(E(1-E))).
+    """
+    eps = 1e-9
+    logp = []
+    for x, prior in zip(xs, p):
+        e = _elo_expected_score(float(x), float(stockfish_elo))
+        e = min(max(e, eps), 1.0 - eps)
+        # likelihood ∝ e^score * (1-e)^(1-score)
+        ll = score * math.log(e) + (1.0 - score) * math.log(1.0 - e)
+        logp.append(math.log(prior + eps) + ll)
+
+    m = max(logp)
+    p2 = [math.exp(v - m) for v in logp]
+    s = sum(p2)
+    return [v / s for v in p2]
+
+
+def _posterior_mean_sigma(xs: list[int], p: list[float]) -> tuple[float, float]:
+    mu = sum(x * w for x, w in zip(xs, p))
+    var = sum(((x - mu) ** 2) * w for x, w in zip(xs, p))
+    return mu, math.sqrt(max(0.0, var))
+
+
+def run_adaptive_elo_tournament(
     patzer: "Patzer",
     checkpoint_path: str,
     stockfish_binary: str,
-    depths: list[int],
-    n_games: int,
-    elo_limits: list[int] | None = None,
-) -> list[dict]:
-    """Play n_games per depth/elo (alternating colors). Returns list of result records."""
-    records = []
-
-    for depth in depths:
-        sf = StockfishPlayer(stockfish_binary, depth=depth)
-        w, l, d = _play_match(patzer, sf, n_games, f"depth={depth}")
-        sf.close()
-        records.append({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "checkpoint": checkpoint_path,
-            "iter_num": patzer.iter_num,
-            "stockfish_depth": depth,
-            "stockfish_elo": None,
-            "games": n_games,
-            "temperature": patzer.temperature,
-            "top_k": patzer.top_k,
-            "conditioning": patzer.conditioning,
-            "W": w, "L": l, "D": d,
-        })
-
-    for elo in (elo_limits or []):
-        sf = StockfishPlayer(stockfish_binary, elo_limit=elo)
-        w, l, d = _play_match(patzer, sf, n_games, f"elo={elo}")
-        sf.close()
-        records.append({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "checkpoint": checkpoint_path,
-            "iter_num": patzer.iter_num,
-            "stockfish_depth": None,
-            "stockfish_elo": elo,
-            "games": n_games,
-            "temperature": patzer.temperature,
-            "top_k": patzer.top_k,
-            "conditioning": patzer.conditioning,
-            "W": w, "L": l, "D": d,
-        })
-
-    return records
-
-
-def run_smart_elo_tournament(
-    patzer: "Patzer",
-    checkpoint_path: str,
-    stockfish_binary: str,
-    n_games: int,
-    anchor_elos: list[int],
-    refine_step: int = 100,
-    max_refine_rounds: int = 2,
+    max_games: int,
+    batch_size: int,
+    prior_elo: float,
+    prior_sigma: float,
+    stop_sigma: float,
+    elo_step: int = 10,
 ) -> list[dict]:
     """
-    Smart workflow:
-      1) run anchor ELOs to bracket where score crosses 50%
-      2) add midpoint-ish probes around the crossing for sharper estimate
+    Sequential cold-start Elo estimation.
+
+    Maintain a posterior over Patzer Elo and pick the next Stockfish Elo to be informative
+    (near the current posterior mean), updating after each game.
     """
-    records: list[dict] = []
-    tested: set[int] = set()
+    sf_min, sf_max = _stockfish_elo_bounds(stockfish_binary)
+    if sf_min is None:
+        sf_min = 0
+    if sf_max is None:
+        sf_max = 4000
 
-    def _run_elo(elo: int) -> tuple[float, dict]:
-        sf = StockfishPlayer(stockfish_binary, elo_limit=elo)
-        w, l, d = _play_match(patzer, sf, n_games, f"elo={elo}")
-        sf.close()
-        rec = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "checkpoint": checkpoint_path,
-            "iter_num": patzer.iter_num,
-            "stockfish_depth": None,
-            "stockfish_elo": elo,
-            "games": n_games,
-            "temperature": patzer.temperature,
-            "top_k": patzer.top_k,
-            "conditioning": patzer.conditioning,
-            "W": w, "L": l, "D": d,
-        }
-        score = (w + 0.5 * d) / n_games if n_games else 0.0
-        return score, rec
+    grid_min = max(0, int(sf_min) - 600)
+    grid_max = int(sf_max) + 600
+    xs, p = _posterior_grid(grid_min, grid_max, elo_step, prior_elo, prior_sigma)
 
-    for elo in sorted(anchor_elos):
-        if elo in tested:
-            continue
-        score, rec = _run_elo(elo)
-        records.append(rec)
-        tested.add(elo)
-        print(f"  [smart] elo={elo} score={score:.3f}")
+    # Accumulate per-elo outcomes for persistence.
+    per_elo: dict[int, dict[str, int]] = {}
 
-    for _ in range(max_refine_rounds):
-        points = sorted(
-            ((r["stockfish_elo"], (r["W"] + 0.5 * r["D"]) / r["games"]) for r in records),
-            key=lambda x: x[0],
-        )
-        lower = [p for p in points if p[1] >= 0.5]
-        upper = [p for p in points if p[1] < 0.5]
-        if not lower or not upper:
+    total_w = total_l = total_d = 0
+    games_played = 0
+
+    def _round_to_step(x: float, step: int) -> int:
+        return int(round(x / step) * step)
+
+    while games_played < max_games:
+        mu, sigma = _posterior_mean_sigma(xs, p)
+        if sigma <= stop_sigma and games_played > 0:
+            print(f"[stop] posterior sigma={sigma:.1f} <= {stop_sigma:.1f} after {games_played} game(s)")
             break
-        # Use the nearest straddling pair around 50%, not far extremes.
-        lo_elo = max(lower, key=lambda x: x[0])[0]  # highest elo with score >= 50%
-        hi_elo = min(upper, key=lambda x: x[0])[0]  # lowest elo with score < 50%
-        if hi_elo <= lo_elo:
-            break
-        if hi_elo - lo_elo <= refine_step:
-            break
-        probe = ((hi_elo + lo_elo) // 2 // refine_step) * refine_step
-        if probe in tested:
-            # If midpoint already tested due to rounding, try neighboring buckets.
-            alt_low = probe - refine_step
-            alt_high = probe + refine_step
-            if lo_elo < alt_low < hi_elo and alt_low not in tested:
-                probe = alt_low
-            elif lo_elo < alt_high < hi_elo and alt_high not in tested:
-                probe = alt_high
-            else:
+
+        # Cold start: begin at the weakest opponent available (models tend to be weak early).
+        if games_played == 0:
+            target_elo = int(sf_min)
+        else:
+            target_elo = _round_to_step(mu, 10)
+        target_elo = max(int(sf_min), min(int(sf_max), int(target_elo)))
+
+        # Play a small batch at this opponent Elo, alternating colors.
+        sf = StockfishPlayer(stockfish_binary, elo_limit=target_elo)
+        for i in range(batch_size):
+            if games_played >= max_games:
                 break
-        score, rec = _run_elo(probe)
-        records.append(rec)
-        tested.add(probe)
-        print(f"  [smart] probe elo={probe} score={score:.3f}")
 
+            patzer_is_white = games_played % 2 == 0
+            white = patzer if patzer_is_white else sf
+            black = sf if patzer_is_white else patzer
+
+            result = play_game(white, black)
+            score = _result_to_score_perspective_of_patzer(result, patzer_is_white)
+
+            if score == 0.5:
+                outcome_tag = "Patzer draw"
+                total_d += 1
+            elif score == 1.0:
+                outcome_tag = "Patzer win"
+                total_w += 1
+            else:
+                outcome_tag = "Patzer loss"
+                total_l += 1
+
+            games_played += 1
+            per_elo.setdefault(target_elo, {"W": 0, "L": 0, "D": 0, "games": 0})
+            per_elo[target_elo]["games"] += 1
+            if score == 1.0:
+                per_elo[target_elo]["W"] += 1
+            elif score == 0.0:
+                per_elo[target_elo]["L"] += 1
+            else:
+                per_elo[target_elo]["D"] += 1
+
+            p = _posterior_update(xs, p, target_elo, score)
+            mu2, sigma2 = _posterior_mean_sigma(xs, p)
+            running_score = (total_w + 0.5 * total_d) / games_played
+            color = "W" if patzer_is_white else "B"
+            print(
+                f"  elo={target_elo} [{games_played}/{max_games}] Patzer={color} → {result} ({outcome_tag})"
+                f" | total W-L-D={total_w}-{total_l}-{total_d} score={running_score*100:5.1f}%"
+                f" | estElo={mu2:6.0f}±{sigma2:4.0f}"
+            )
+        sf.close()
+
+    records: list[dict] = []
+    now = datetime.now(timezone.utc).isoformat()
+    for elo, c in sorted(per_elo.items(), key=lambda kv: kv[0]):
+        records.append(
+            {
+                "timestamp": now,
+                "checkpoint": checkpoint_path,
+                "iter_num": patzer.iter_num,
+                "stockfish_depth": None,
+                "stockfish_elo": int(elo),
+                "games": int(c["games"]),
+                "temperature": patzer.temperature,
+                "top_k": patzer.top_k,
+                "conditioning": patzer.conditioning,
+                "W": int(c["W"]),
+                "L": int(c["L"]),
+                "D": int(c["D"]),
+            }
+        )
     return records
 
 
@@ -290,64 +396,86 @@ def aggregate_results(records: list[dict]) -> list[dict]:
 
 
 def estimate_model_elo(records: list[dict]) -> list[dict]:
-    """Estimate model ELO from elo-limited Stockfish results.
-
-    For each (checkpoint, conditioning, temperature, top_k) group, compute score vs
-    each configured Stockfish ELO and interpolate the model ELO at 50% expected score.
     """
-    grouped: dict[tuple, list[tuple[int, float, int]]] = {}
+    Estimate model Elo from elo-limited Stockfish results using a 1D likelihood grid.
 
+    This matches the adaptive tournament's underlying model (Elo expected score curve),
+    and produces sensible estimates even from a single point (with high uncertainty),
+    unlike the old "50% crossing" interpolation.
+    """
+    # Group aggregated elo results by model/config.
+    grouped: dict[tuple, list[dict]] = {}
     for r in aggregate_results(records):
         elo = r.get("stockfish_elo")
         if elo is None:
             continue
-        total = r["W"] + r["L"] + r["D"]
-        if total == 0:
+        total = int(r["W"]) + int(r["L"]) + int(r["D"])
+        if total <= 0:
             continue
-        score = (r["W"] + 0.5 * r["D"]) / total
         key = (
             r["checkpoint"],
             r.get("conditioning", ""),
             r.get("temperature", 1.0),
             r.get("top_k"),
         )
-        grouped.setdefault(key, []).append((elo, score, total))
+        grouped.setdefault(key, []).append(
+            {
+                "elo": int(elo),
+                "W": int(r["W"]),
+                "L": int(r["L"]),
+                "D": int(r["D"]),
+                "games": total,
+            }
+        )
 
-    estimates = []
-    for key, points in grouped.items():
-        points.sort(key=lambda x: x[0])
-        below = [p for p in points if p[1] >= 0.5]
-        above = [p for p in points if p[1] < 0.5]
+    estimates: list[dict] = []
+    eps = 1e-9
 
-        est = None
-        note = ""
-        if below and above:
-            # Interpolate from the nearest straddling pair around score=50%.
-            lo = max(below, key=lambda x: x[0])  # highest elo with score >= 50%
-            hi = min(above, key=lambda x: x[0])  # lowest elo with score < 50%
-            if lo[0] != hi[0] and lo[1] != hi[1]:
-                t = (0.5 - hi[1]) / (lo[1] - hi[1])
-                est = hi[0] + t * (lo[0] - hi[0])
-                note = "interpolated"
-        elif below:
-            strongest = max(points, key=lambda x: x[0])
-            est = float(strongest[0])
-            note = "lower_bound"
-        elif above:
-            weakest = min(points, key=lambda x: x[0])
-            est = float(weakest[0])
-            note = "upper_bound"
+    for key, pts in grouped.items():
+        pts.sort(key=lambda x: x["elo"])
+        min_elo = pts[0]["elo"]
+        max_elo = pts[-1]["elo"]
 
-        estimates.append({
-            "checkpoint": key[0],
-            "conditioning": key[1],
-            "temperature": key[2],
-            "top_k": key[3],
-            "elo_estimate": est,
-            "n_points": len(points),
-            "total_games": sum(p[2] for p in points),
-            "method": note,
-        })
+        # Wide grid around observed opponents.
+        grid_min = max(0, min_elo - 800)
+        grid_max = max_elo + 800
+        step = 5
+        xs = list(range(grid_min, grid_max + 1, step))
+
+        # Uniform prior over the grid.
+        logp = [0.0 for _ in xs]
+
+        for i, x in enumerate(xs):
+            ll = 0.0
+            for pnt in pts:
+                elo = float(pnt["elo"])
+                # Treat draws as half-win/half-loss for likelihood.
+                s = float(pnt["W"]) + 0.5 * float(pnt["D"])
+                f = float(pnt["L"]) + 0.5 * float(pnt["D"])
+                e = _elo_expected_score(float(x), elo)
+                e = min(max(e, eps), 1.0 - eps)
+                ll += s * math.log(e) + f * math.log(1.0 - e)
+            logp[i] = ll
+
+        m = max(logp)
+        p = [math.exp(v - m) for v in logp]
+        z = sum(p)
+        p = [v / z for v in p]
+
+        mu, sigma = _posterior_mean_sigma(xs, p)
+        estimates.append(
+            {
+                "checkpoint": key[0],
+                "conditioning": key[1],
+                "temperature": key[2],
+                "top_k": key[3],
+                "elo_estimate": mu,
+                "elo_sigma": sigma,
+                "n_points": len(pts),
+                "total_games": sum(pnt["games"] for pnt in pts),
+                "method": "grid_posterior",
+            }
+        )
 
     estimates.sort(key=lambda r: (r["checkpoint"], r["conditioning"]))
     return estimates
@@ -357,17 +485,27 @@ def show_elo_estimates():
     records = load_results()
     estimates = estimate_model_elo(records)
     if not estimates:
-        print("No ELO-limited results yet. Run with --stockfish-elo first.")
+        print("No ELO-limited results yet. Run the tournament first.")
         return
 
-    print(f"\n{'Checkpoint':<40} {'Cond':<12} {'T':>4} {'Games':>6} {'Pts':>4} {'EstElo':>8} {'Method':<14}")
+    print(
+        f"\n{'Model':<18} {'Iter':>6} {'Cond':<12} {'T':>4} {'Games':>6} {'Pts':>4} "
+        f"{'EstElo':>8} {'±':>1} {'Sig':>4} {'Method':<14}"
+    )
     print("-" * 98)
     for r in estimates:
-        ckpt = Path(r["checkpoint"]).name
+        ckpt = _checkpoint_label(r["checkpoint"])
         elo = "n/a" if r["elo_estimate"] is None else f"{r['elo_estimate']:.0f}"
+        sig = "n/a" if r.get("elo_sigma") is None else f"{r['elo_sigma']:.0f}"
+        # Look up a representative iter_num for display.
+        iter_num = "?"
+        for rec in records:
+            if rec.get("checkpoint") == r["checkpoint"]:
+                iter_num = rec.get("iter_num", "?")
+                break
         print(
-            f"{ckpt:<40} {r['conditioning']:<12} {r['temperature']:>4.1f} "
-            f"{r['total_games']:>6} {r['n_points']:>4} {elo:>8} {r['method']:<14}"
+            f"{ckpt:<18} {iter_num:>6} {r['conditioning']:<12} {r['temperature']:>4.1f} "
+            f"{r['total_games']:>6} {r['n_points']:>4} {elo:>8} ± {sig:>4} {r['method']:<14}"
         )
 
 def show_results():
@@ -376,42 +514,96 @@ def show_results():
         print("No results yet.")
         return
 
-    rows = aggregate_results(records)
-    print(f"\n{'Checkpoint':<40} {'Iter':>6} {'Opponent':<12} {'Cond':<12} {'T':>4} {'N':>5} {'W':>4} {'L':>4} {'D':>4} {'Score':>7}")
-    print("-" * 113)
+    # Model-centric summary (aligned with adaptive Elo evaluation).
+    from collections import defaultdict
+
+    # Keyed by (checkpoint, conditioning, temperature, top_k)
+    totals: dict[tuple, dict] = defaultdict(lambda: {"W": 0, "L": 0, "D": 0, "iter_num": "?"})
+    for r in records:
+        key = (
+            r.get("checkpoint"),
+            r.get("conditioning", ""),
+            r.get("temperature", 1.0),
+            r.get("top_k"),
+        )
+        totals[key]["W"] += int(r.get("W", 0))
+        totals[key]["L"] += int(r.get("L", 0))
+        totals[key]["D"] += int(r.get("D", 0))
+        if totals[key]["iter_num"] == "?" and r.get("iter_num") is not None:
+            totals[key]["iter_num"] = r.get("iter_num")
+
+    # Attach Elo estimates where available.
+    est_map: dict[tuple, dict] = {}
+    for e in estimate_model_elo(records):
+        k = (e["checkpoint"], e["conditioning"], e["temperature"], e["top_k"])
+        est_map[k] = e
+
+    rows = []
+    for key, c in totals.items():
+        ckpt, cond, temp, top_k = key
+        total = c["W"] + c["L"] + c["D"]
+        score = (c["W"] + 0.5 * c["D"]) / total * 100 if total else 0.0
+        e = est_map.get(key, {})
+        rows.append(
+            {
+                "model": _checkpoint_label(str(ckpt)),
+                "checkpoint": ckpt,
+                "iter_num": c["iter_num"],
+                "conditioning": cond,
+                "temperature": temp,
+                "top_k": top_k,
+                "games": total,
+                "W": c["W"],
+                "L": c["L"],
+                "D": c["D"],
+                "score": score,
+                "elo_estimate": e.get("elo_estimate"),
+                "elo_sigma": e.get("elo_sigma"),
+                "elo_method": e.get("method", ""),
+            }
+        )
+
+    rows.sort(
+        key=lambda r: (
+            float("-inf") if r["elo_estimate"] is None else float(r["elo_estimate"]),
+            r["model"],
+        ),
+        reverse=True,
+    )
+
+    print(
+        f"\n{'Model':<18} {'Iter':>6} {'Cond':<12} {'T':>4} {'Games':>6} "
+        f"{'W':>4} {'L':>4} {'D':>4} {'Score':>7} {'EstElo':>8} {'Sig':>4} {'Method':<12}"
+    )
+    print("-" * 96)
     for r in rows:
-        ckpt = Path(r["checkpoint"]).name
-        total = r["W"] + r["L"] + r["D"]
-        score = (r["W"] + 0.5 * r["D"]) / total * 100 if total else 0
-        if r.get("stockfish_elo") is not None:
-            opponent = f"elo{r['stockfish_elo']}"
-        else:
-            opponent = f"d{r['stockfish_depth']}"
+        elo = "n/a" if r["elo_estimate"] is None else f"{r['elo_estimate']:.0f}"
+        sig = "n/a"
+        if r.get("elo_sigma") is not None:
+            sig = f"{r['elo_sigma']:.0f}"
         print(
-            f"{ckpt:<40} {r.get('iter_num', '?'):>6} {opponent:<12} "
-            f"{r['conditioning']:<12} {r['temperature']:>4.1f} "
-            f"{total:>5} {r['W']:>4} {r['L']:>4} {r['D']:>4} {score:>6.1f}%"
+            f"{r['model']:<18} {r['iter_num']:>6} {r['conditioning']:<12} {r['temperature']:>4.1f} "
+            f"{r['games']:>6} {r['W']:>4} {r['L']:>4} {r['D']:>4} {r['score']:>6.1f}% "
+            f"{elo:>8} {sig:>4} {r['elo_method']:<12}"
         )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Patzer vs Stockfish tournament")
-    parser.add_argument("--checkpoint", help="Path to checkpoint (local or R2 key)")
+    parser.add_argument(
+        "--checkpoint",
+        help=(
+            "Path to checkpoint (local file or R2 key). "
+            "If omitted, uses latest local checkpoints/patzer_vX/ckpt_best.pt (or ckpt.pt)"
+        ),
+    )
     parser.add_argument("--pull-r2", action="store_true", help="Download checkpoint from R2 first")
-    parser.add_argument("--depths", nargs="+", type=int, default=[],
-                        help="Legacy depth-based opponents (prefer --stockfish-elo or --smart-elo)")
-    parser.add_argument("--stockfish-elo", nargs="+", type=int, default=None,
-                        help="ELO-limited Stockfish targets (e.g. --stockfish-elo 1200 1500)")
-    parser.add_argument("--smart-elo", action="store_true",
-                        help="Run adaptive ELO ladder, then estimate model ELO")
-    parser.add_argument("--anchor-elos", nargs="+", type=int,
-                        default=[900, 1100, 1300, 1500, 1700, 1900],
-                        help="Anchor ELOs used by --smart-elo")
-    parser.add_argument("--refine-step", type=int, default=100,
-                        help="Probe step size for --smart-elo refinement")
-    parser.add_argument("--max-refine-rounds", type=int, default=2,
-                        help="Extra probe rounds for --smart-elo")
-    parser.add_argument("--games", type=int, default=20, help="Games per depth (alternates colors)")
+    parser.add_argument("--games", type=int, default=50, help="Max games to play (adaptive Elo)")
+    parser.add_argument("--batch-size", type=int, default=2, help="Games per opponent Elo before repicking")
+    parser.add_argument("--prior-elo", type=float, default=1600, help="Prior mean for Patzer Elo")
+    parser.add_argument("--prior-sigma", type=float, default=400, help="Prior stddev for Patzer Elo")
+    parser.add_argument("--stop-sigma", type=float, default=35, help="Stop once posterior stddev <= this")
+    parser.add_argument("--grid-step", type=int, default=10, help="Elo grid step size for posterior")
     parser.add_argument("--stockfish", default="/opt/homebrew/bin/stockfish")
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--top-k", type=int, default=None)
@@ -437,8 +629,16 @@ def main():
         show_elo_estimates()
         return
 
+    checkpoints_dir = Path(__file__).parent.parent / "checkpoints"
     if not args.checkpoint:
-        parser.error("--checkpoint is required unless --show")
+        ckpt_auto = _latest_local_checkpoint_file(checkpoints_dir)
+        if ckpt_auto is None:
+            parser.error(
+                "--checkpoint not provided and no local checkpoints found at "
+                f"{checkpoints_dir}/patzer_vX/ckpt_best.pt (or ckpt.pt)"
+            )
+        args.checkpoint = str(ckpt_auto)
+        print(f"[default] using local checkpoint {args.checkpoint} (@eval/tournament.py)")
 
     ckpt_path = Path(args.checkpoint).expanduser()
     try:
@@ -470,8 +670,14 @@ def main():
             )
         sys.exit(1)
 
-    if not args.smart_elo and not args.depths and not args.stockfish_elo:
-        parser.error("Provide --smart-elo, --stockfish-elo, or --depths")
+    if args.games <= 0:
+        parser.error("--games must be > 0")
+    if args.batch_size <= 0:
+        parser.error("--batch-size must be > 0")
+    if args.grid_step <= 0:
+        parser.error("--grid-step must be > 0")
+    if args.stop_sigma < 0:
+        parser.error("--stop-sigma must be >= 0")
 
     patzer = Patzer(
         ckpt_path,
@@ -481,29 +687,20 @@ def main():
         conditioning=args.conditioning,
     )
 
-    if args.smart_elo:
-        records = run_smart_elo_tournament(
-            patzer,
-            args.checkpoint,
-            args.stockfish,
-            args.games,
-            anchor_elos=args.anchor_elos,
-            refine_step=args.refine_step,
-            max_refine_rounds=args.max_refine_rounds,
-        )
-    else:
-        records = run_tournament(
-            patzer,
-            args.checkpoint,
-            args.stockfish,
-            args.depths,
-            args.games,
-            elo_limits=args.stockfish_elo,
-        )
+    records = run_adaptive_elo_tournament(
+        patzer,
+        args.checkpoint,
+        args.stockfish,
+        max_games=args.games,
+        batch_size=args.batch_size,
+        prior_elo=args.prior_elo,
+        prior_sigma=args.prior_sigma,
+        stop_sigma=args.stop_sigma,
+        elo_step=args.grid_step,
+    )
     save_results(records)
     show_results()
-    if args.smart_elo or args.stockfish_elo:
-        show_elo_estimates()
+    show_elo_estimates()
 
     if patzer.illegal_move_count:
         print(f"\n[note] fell back to random move {patzer.illegal_move_count} time(s)")

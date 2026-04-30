@@ -10,6 +10,9 @@ eval_iters = 200
 log_interval = 100
 
 always_save_checkpoint = True
+# Generous early stop: ~15k steps without val improvement, only after 10k steps.
+early_stop_patience_evals = 15
+early_stop_min_iters = 10000
 
 wandb_log = True
 wandb_project = 'patzer'

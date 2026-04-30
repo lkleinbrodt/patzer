@@ -3,6 +3,7 @@ eval/engine.py
 
 PatzaPlayer: loads a trained GPT checkpoint and generates legal chess moves
 using the model's probability distribution with legal-move masking.
+Use checkpoints/.../ckpt_best.pt for best-val weights (eval defaults); ckpt.pt is latest-for-resume.
 """
 
 import random
@@ -152,6 +153,19 @@ class StockfishPlayer:
         self.elo_limit = elo_limit
         self.engine = chess.engine.SimpleEngine.popen_uci(binary_path)
         if elo_limit is not None:
+            # Some Stockfish builds enforce a minimum/maximum UCI_Elo. Clamp so callers
+            # (e.g. smart ELO sweeps) don't crash when probing outside the supported range.
+            try:
+                opt = self.engine.options.get("UCI_Elo")
+                if opt is not None:
+                    if opt.min is not None:
+                        elo_limit = max(int(opt.min), int(elo_limit))
+                    if opt.max is not None:
+                        elo_limit = min(int(opt.max), int(elo_limit))
+            except Exception:
+                # If option introspection fails, fall back to requested value.
+                pass
+            self.elo_limit = elo_limit
             self.engine.configure({"UCI_LimitStrength": True, "UCI_Elo": elo_limit})
 
     @property
