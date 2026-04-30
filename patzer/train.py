@@ -54,6 +54,9 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 wandb_log = False # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
+# Persisted in checkpoints so `--init_from=resume` can continue the same run.
+# Empty string means "create a fresh run".
+wandb_run_id = ""
 # data
 dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
@@ -205,6 +208,7 @@ elif init_from == 'resume':
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
     evals_without_improvement = int(checkpoint.get('evals_without_improvement', 0))
+    wandb_run_id = str(checkpoint.get('wandb_run_id', wandb_run_id or ""))
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -271,7 +275,15 @@ def get_lr(it):
 # logging
 if wandb_log and master_process:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    wandb_init_kwargs = dict(project=wandb_project, name=wandb_run_name, config=config)
+    # If we have a stored run id and we're resuming training, keep logging into that same run.
+    # Using explicit `step=iter_num` on wandb.log keeps the x-axis consistent across restarts.
+    if init_from == 'resume' and wandb_run_id:
+        wandb_init_kwargs.update(id=wandb_run_id, resume="must")
+    run = wandb.init(**wandb_init_kwargs)
+    # Capture id for checkpointing (fresh run or missing id in old checkpoints).
+    if not wandb_run_id:
+        wandb_run_id = run.id
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -299,7 +311,7 @@ while True:
                 "val/loss": val_loss,
                 "lr": lr,
                 "mfu": running_mfu*100,
-            })
+            }, step=iter_num)
         # append to metrics log and push to R2 so training curve is always visible
         import json as _json, time as _time
         metrics_local = os.path.join(out_dir, 'metrics.jsonl')
@@ -338,6 +350,7 @@ while True:
                     'best_val_loss': best_val_loss,
                     'evals_without_improvement': evals_without_improvement,
                     'config': config,
+                    'wandb_run_id': wandb_run_id,
                 }
                 if save_latest:
                     print(f"saving checkpoint to {out_dir}")

@@ -92,13 +92,20 @@ def r2_export_lines() -> str:
     return "\n".join(lines)
 
 
-def build_script(config: str, resume: bool, wipe: bool = False, terminate_on_error: bool = False) -> str:
+def build_script(
+    config: str,
+    resume: bool,
+    wipe: bool = False,
+    terminate_on_error: bool = False,
+    wandb_run_id: str | None = None,
+) -> str:
     pull_ckpt = (
         f"python -c \"import sys; sys.path.insert(0,'patzer'); import r2; "
         f"r2.pull_dir('checkpoints', 'checkpoints')\" || true"
         if resume else ""
     )
     resume_flag = "--init_from=resume" if resume else ""
+    wandb_resume_flag = f"--wandb_run_id={wandb_run_id}" if (wandb_run_id and resume) else ""
 
     # Vast.ai injects $CONTAINER_ID inside the container — that's the instance ID.
     # We install vastai so the script can self-destruct when done.
@@ -170,7 +177,7 @@ trap _on_exit EXIT"""
         "cd patzer",
         pull_ckpt,
         f'_notify "Patzer: training started" "Config: {config}  Instance: ${{CONTAINER_ID:-unknown}}" "default"',
-        f"python -u train.py config/{config}.py {resume_flag} 2>&1 | tee /workspace/train.log".strip(),
+        f"python -u train.py config/{config}.py {resume_flag} {wandb_resume_flag} 2>&1 | tee /workspace/train.log".strip(),
     ]))
 
 
@@ -235,7 +242,13 @@ def show_status(instance_id: int):
     print(result.stdout or result.stderr or "(no output)")
 
 
-def run_on_instance(instance_id: int, config: str, resume: bool, terminate_on_error: bool = False):
+def run_on_instance(
+    instance_id: int,
+    config: str,
+    resume: bool,
+    terminate_on_error: bool = False,
+    wandb_run_id: str | None = None,
+):
     print(f"Fetching info for instance {instance_id}...")
     info = vast("show", "instance", str(instance_id))
     status = info.get("actual_status", "unknown")
@@ -248,7 +261,13 @@ def run_on_instance(instance_id: int, config: str, resume: bool, terminate_on_er
     print(f"Instance is running — {info.get('gpu_name', '?')} @ {host}:{port}")
     print(f"Wiping {WORKSPACE} and doing a fresh clone...")
 
-    script = build_script(config, resume, wipe=True, terminate_on_error=terminate_on_error)
+    script = build_script(
+        config,
+        resume,
+        wipe=True,
+        terminate_on_error=terminate_on_error,
+        wandb_run_id=wandb_run_id,
+    )
 
     # Write the script to the instance then run it in a tmux session.
     # Piping via stdin avoids any quoting nightmares with the script content.
@@ -288,6 +307,11 @@ def main():
                         help="Config filename without .py (e.g. train_patzer_v3)")
     parser.add_argument("--resume", action="store_true",
                         help="Pull R2 checkpoint before training (pass init_from=resume)")
+    parser.add_argument(
+        "--wandb-run-id",
+        default="",
+        help="W&B run id to resume into (only used with --resume). Example: a41yuxdq",
+    )
     parser.add_argument("--instance", type=int, metavar="ID",
                         help="Run on an existing instance instead of renting a new one")
     parser.add_argument("--list", action="store_true",
@@ -319,7 +343,13 @@ def main():
         return
 
     if args.instance:
-        run_on_instance(args.instance, args.config, args.resume, args.terminate_on_error)
+        run_on_instance(
+            args.instance,
+            args.config,
+            args.resume,
+            args.terminate_on_error,
+            args.wandb_run_id or None,
+        )
         return
 
     # --- Rent a new instance ---
@@ -370,8 +400,13 @@ def main():
         "--disk", str(args.disk),
         "--ssh",
         "--env", r2_env_flags(),
-        "--onstart-cmd", build_script(args.config, args.resume, wipe=False,
-                                      terminate_on_error=args.terminate_on_error),
+        "--onstart-cmd", build_script(
+            args.config,
+            args.resume,
+            wipe=False,
+            terminate_on_error=args.terminate_on_error,
+            wandb_run_id=args.wandb_run_id or None,
+        ),
     ]
     if args.interruptible:
         bid = round(offer.get("min_bid", offer["dph_total"]) * 1.15, 4)

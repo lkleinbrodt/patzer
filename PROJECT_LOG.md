@@ -30,3 +30,9 @@ I want to write one (or many) blog posts about this project. So we should keep a
 - **2026-04-29:** Model versioning reset after bad v2 run: set up **v2** = v1-sized (6L/6H/384d, ~12M) trained on the new **11.7M-game / 913M-token** dataset, and **v3** = 12L/8H/512d (~40M) on the same dataset. `train_patzer.py` now points at v3 by default; configs live in `patzer/config/train_patzer_v2.py` and `patzer/config/train_patzer_v3.py`.
 
 - **2026-04-29:** Vast (RTX 3060 12GB) OOM guard: switched v2/v3 configs to `batch_size=32` with `gradient_accumulation_steps=4` to preserve the same effective tokens/iter while reducing VRAM.
+
+- **2026-04-30:** Resuming cloud training runs: `launch.py --resume` pulls `checkpoints/` from R2 and runs `train.py --init_from=resume` (resume from `out_dir/ckpt.pt`). To continue a finished run (e.g. v2 stopped at 150k but val loss still falling), bump `max_iters` / `lr_decay_iters` above the prior stop and relaunch on Vast with `--resume`.
+
+- **2026-04-30:** W&B resume support: `patzer/train.py` now stores `wandb_run_id` inside `ckpt.pt` and uses `wandb.init(..., id=..., resume="must")` on `--init_from=resume`, plus logs with `step=iter_num` so charts continue from the right step instead of starting a new run.
+
+- **2026-04-30:** Eval display-name fix: `eval/tournament.py` and `eval/model_tournament.py` now prefer the **model version** directory (`patzer_v*`) for the `Model` label instead of checkpoint filenames like `ckpt_150000`, so tables show stable model ids with iteration shown separately (or as `_best` when appropriate).

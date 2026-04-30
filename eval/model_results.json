@@ -1520,5 +1520,185 @@
       "seed": 1337,
       "openings": "builtin_short_uci"
     }
+  },
+  {
+    "model_a": "checkpoints/patzer_v2/ckpt_010000.pt",
+    "model_b": "checkpoints/patzer_v2/ckpt_150000.pt",
+    "iter_a": 10000,
+    "iter_b": 150000,
+    "label_a": "ckpt_010000.pt@10000",
+    "label_b": "ckpt_150000.pt@150000",
+    "games": 12,
+    "W": 2,
+    "L": 10,
+    "D": 0,
+    "score": 0.16666666666666666,
+    "sprt": {
+      "p0": 0.5,
+      "p1": 0.6,
+      "alpha": 0.1,
+      "beta": 0.1,
+      "llr": -1.8667923995541877,
+      "decision": "inconclusive",
+      "A": 2.1972245773362196,
+      "B": -2.197224577336219
+    },
+    "timestamp": "2026-04-30T15:41:15.252254+00:00",
+    "type": "stage1_vs_baseline",
+    "settings": {
+      "prefix": "checkpoints/patzer_v2",
+      "prefixes": [
+        "checkpoints/patzer_v2"
+      ],
+      "temperature": 0.0,
+      "top_k": null,
+      "conditioning": "match_color",
+      "seed": 1337,
+      "openings": "builtin_short_uci"
+    }
+  },
+  {
+    "model_a": "checkpoints/patzer_v2/ckpt_070000.pt",
+    "model_b": "checkpoints/patzer_v2/ckpt_150000.pt",
+    "iter_a": 70000,
+    "iter_b": 150000,
+    "label_a": "ckpt_070000.pt@70000",
+    "label_b": "ckpt_150000.pt@150000",
+    "games": 12,
+    "W": 2,
+    "L": 4,
+    "D": 6,
+    "score": 0.4166666666666667,
+    "sprt": {
+      "p0": 0.5,
+      "p1": 0.6,
+      "alpha": 0.1,
+      "beta": 0.1,
+      "llr": -0.6503970752296949,
+      "decision": "inconclusive",
+      "A": 2.1972245773362196,
+      "B": -2.197224577336219
+    },
+    "timestamp": "2026-04-30T15:41:15.252254+00:00",
+    "type": "stage1_vs_baseline",
+    "settings": {
+      "prefix": "checkpoints/patzer_v2",
+      "prefixes": [
+        "checkpoints/patzer_v2"
+      ],
+      "temperature": 0.0,
+      "top_k": null,
+      "conditioning": "match_color",
+      "seed": 1337,
+      "openings": "builtin_short_uci"
+    }
+  },
+  {
+    "model_a": "checkpoints/patzer_v2/ckpt_150000.pt",
+    "model_b": "checkpoints/patzer_v2/ckpt_070000.pt",
+    "iter_a": 150000,
+    "iter_b": 70000,
+    "label_a": "ckpt_150000.pt@150000",
+    "label_b": "ckpt_070000.pt@70000",
+    "games": 30,
+    "W": 15,
+    "L": 5,
+    "D": 10,
+    "score": 0.6666666666666666,
+    "sprt": {
+      "p0": 0.5,
+      "p1": 0.6,
+      "alpha": 0.1,
+      "beta": 0.1,
+      "llr": 1.414995622736995,
+      "decision": "inconclusive",
+      "A": 2.1972245773362196,
+      "B": -2.197224577336219
+    },
+    "timestamp": "2026-04-30T15:41:15.252254+00:00",
+    "type": "league_pair",
+    "settings": {
+      "prefix": "checkpoints/patzer_v2",
+      "prefixes": [
+        "checkpoints/patzer_v2"
+      ],
+      "temperature": 0.0,
+      "top_k": null,
+      "conditioning": "match_color",
+      "seed": 1337,
+      "openings": "builtin_short_uci"
+    }
+  },
+  {
+    "model_a": "checkpoints/patzer_v2/ckpt_150000.pt",
+    "model_b": "checkpoints/patzer_v2/ckpt_010000.pt",
+    "iter_a": 150000,
+    "iter_b": 10000,
+    "label_a": "ckpt_150000.pt@150000",
+    "label_b": "ckpt_010000.pt@10000",
+    "games": 16,
+    "W": 13,
+    "L": 0,
+    "D": 3,
+    "score": 0.90625,
+    "sprt": {
+      "p0": 0.5,
+      "p1": 0.6,
+      "alpha": 0.1,
+      "beta": 0.1,
+      "llr": 2.308947246541027,
+      "decision": "A_better",
+      "A": 2.1972245773362196,
+      "B": -2.197224577336219
+    },
+    "timestamp": "2026-04-30T15:41:15.252254+00:00",
+    "type": "league_pair",
+    "settings": {
+      "prefix": "checkpoints/patzer_v2",
+      "prefixes": [
+        "checkpoints/patzer_v2"
+      ],
+      "temperature": 0.0,
+      "top_k": null,
+      "conditioning": "match_color",
+      "seed": 1337,
+      "openings": "builtin_short_uci"
+    }
+  },
+  {
+    "model_a": "checkpoints/patzer_v2/ckpt_070000.pt",
+    "model_b": "checkpoints/patzer_v2/ckpt_010000.pt",
+    "iter_a": 70000,
+    "iter_b": 10000,
+    "label_a": "ckpt_070000.pt@70000",
+    "label_b": "ckpt_010000.pt@10000",
+    "games": 30,
+    "W": 11,
+    "L": 8,
+    "D": 11,
+    "score": 0.55,
+    "sprt": {
+      "p0": 0.5,
+      "p1": 0.6,
+      "alpha": 0.1,
+      "beta": 0.1,
+      "llr": -0.004132255641580443,
+      "decision": "inconclusive",
+      "A": 2.1972245773362196,
+      "B": -2.197224577336219
+    },
+    "timestamp": "2026-04-30T15:41:15.252254+00:00",
+    "type": "league_pair",
+    "settings": {
+      "prefix": "checkpoints/patzer_v2",
+      "prefixes": [
+        "checkpoints/patzer_v2"
+      ],
+      "temperature": 0.0,
+      "top_k": null,
+      "conditioning": "match_color",
+      "seed": 1337,
+      "openings": "builtin_short_uci"
+    }
   }
 ]

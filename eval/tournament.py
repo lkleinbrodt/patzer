@@ -39,11 +39,15 @@ def _checkpoint_label(checkpoint: str) -> str:
     Human-friendly model id for display.
     - checkpoints/patzer_v1/ckpt_best.pt -> patzer_v1
     - checkpoints/patzer_v1/ckpt.pt -> patzer_v1
+    - checkpoints/patzer_v2/ckpt_150000.pt -> patzer_v2
     - otherwise fall back to path stem/name.
     """
     p = Path(checkpoint)
-    if p.name in ("ckpt.pt", "ckpt_best.pt") and p.parent.name:
-        return p.parent.name
+    if p.suffix == ".pt" and p.parent.name and p.parent.name.startswith("patzer_v"):
+        # Prefer model-version directory names over ckpt filenames.
+        # This keeps the "Model" column stable while "Iter" carries the step.
+        if p.name.startswith("ckpt"):
+            return p.parent.name
     if p.stem:
         return p.stem
     return p.name or str(checkpoint)

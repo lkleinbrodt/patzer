@@ -54,6 +54,7 @@
 
 ### Architecture
 
+
 | param      | value |
 | ---------- | ----- |
 | n_layer    | 6     |
@@ -62,14 +63,17 @@
 | block_size | 256   |
 | params     | ~12M  |
 
+
 ### Training
 
-| param      | value |
-| ---------- | ----- |
-| data       | ~868M train tokens, 1800+ ELO, ~11.15M games |
-| batch_size | 128   |
-| max_iters  | 150,000 |
-| lr         | 1e-3 → 1e-5 (cosine) |
+
+| param      | value                                                     |
+| ---------- | --------------------------------------------------------- |
+| data       | ~868M train tokens, 1800+ ELO, ~11.15M games              |
+| batch_size | 128                                                       |
+| max_iters  | 150,000(was still learning, resuming training with 250k) |
+| lr         | 1e-3 → 1e-5 (cosine)                                      |
+
 
 ---
 
@@ -81,6 +85,7 @@
 
 ### Architecture
 
+
 | param      | value |
 | ---------- | ----- |
 | n_layer    | 12    |
@@ -89,14 +94,15 @@
 | block_size | 256   |
 | params     | ~40M  |
 
+
 ### Training
 
-| param      | value |
-| ---------- | ----- |
-| data       | ~868M train tokens, 1800+ ELO, ~11.15M games |
-| batch_size | 128   |
-| max_iters  | 150,000 |
-| lr         | 6e-4 → 1e-5 (cosine) |
 
+| param      | value                                        |
+| ---------- | -------------------------------------------- |
+| data       | ~868M train tokens, 1800+ ELO, ~11.15M games |
+| batch_size | 128                                          |
+| max_iters  | 150,000                                      |
+| lr         | 6e-4 → 1e-5 (cosine)                         |
 
 

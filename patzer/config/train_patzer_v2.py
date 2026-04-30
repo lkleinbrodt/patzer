@@ -42,8 +42,8 @@ dropout = 0.0
 
 # Keep v1 LR for comparability; train longer because we have vastly more data.
 learning_rate = 1e-3
-max_iters = 150000
-lr_decay_iters = 150000
+max_iters = 250000
+lr_decay_iters = 250000
 min_lr = 1e-5
 beta1 = 0.9
 beta2 = 0.99

@@ -454,8 +454,12 @@ def save_model_results(records: list[dict]) -> None:
 
 def _format_label(key: str) -> str:
     p = Path(key)
-    if p.name in ("ckpt.pt", "ckpt_best.pt") and p.parent.name:
-        return f"{p.parent.name}/{p.name}"
+    # Prefer stable "model version" labels over checkpoint filenames.
+    # Iteration is displayed separately (we append "@{iter_num}" elsewhere).
+    if p.suffix == ".pt" and p.parent.name and p.parent.name.startswith("patzer_v") and p.name.startswith("ckpt"):
+        if p.name == "ckpt_best.pt":
+            return f"{p.parent.name}_best"
+        return p.parent.name
     return p.name or key
 
 
