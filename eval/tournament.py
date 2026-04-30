@@ -21,6 +21,7 @@ import json
 import math
 import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -76,7 +77,7 @@ def _latest_local_checkpoint_file(checkpoints_dir: Path) -> Path | None:
     return None
 
 
-def play_game(white, black, max_moves: int = 300) -> str:
+def play_game(white, black, max_moves: int = 300, timings: dict | None = None) -> str:
     """Play one game; returns '1-0', '0-1', or '1/2-1/2'."""
     board = chess.Board()
     move_history: list[str] = []
@@ -85,7 +86,14 @@ def play_game(white, black, max_moves: int = 300) -> str:
         player = white if board.turn == chess.WHITE else black
 
         try:
+            t0 = time.perf_counter()
             uci = player.get_move(board, move_history)
+            dt = time.perf_counter() - t0
+            if timings is not None:
+                key = getattr(player, "name", type(player).__name__)
+                slot = timings.setdefault(key, {"secs": 0.0, "plies": 0})
+                slot["secs"] += float(dt)
+                slot["plies"] += 1
             move = chess.Move.from_uci(uci)
         except Exception as e:
             print(f"  [warn] {player.name} error: {e} — random move")
@@ -257,66 +265,92 @@ def run_adaptive_elo_tournament(
 
     total_w = total_l = total_d = 0
     games_played = 0
+    timings: dict | None = {} if getattr(patzer, "_collect_timings", False) else None
+    sf: StockfishPlayer | None = None
 
     def _round_to_step(x: float, step: int) -> int:
         return int(round(x / step) * step)
 
-    while games_played < max_games:
-        mu, sigma = _posterior_mean_sigma(xs, p)
-        if sigma <= stop_sigma and games_played > 0:
-            print(f"[stop] posterior sigma={sigma:.1f} <= {stop_sigma:.1f} after {games_played} game(s)")
-            break
-
-        # Cold start: begin at the weakest opponent available (models tend to be weak early).
-        if games_played == 0:
-            target_elo = int(sf_min)
-        else:
-            target_elo = _round_to_step(mu, 10)
-        target_elo = max(int(sf_min), min(int(sf_max), int(target_elo)))
-
-        # Play a small batch at this opponent Elo, alternating colors.
-        sf = StockfishPlayer(stockfish_binary, elo_limit=target_elo)
-        for i in range(batch_size):
-            if games_played >= max_games:
+    try:
+        while games_played < max_games:
+            mu, sigma = _posterior_mean_sigma(xs, p)
+            if sigma <= stop_sigma and games_played > 0:
+                print(f"[stop] posterior sigma={sigma:.1f} <= {stop_sigma:.1f} after {games_played} game(s)")
                 break
 
-            patzer_is_white = games_played % 2 == 0
-            white = patzer if patzer_is_white else sf
-            black = sf if patzer_is_white else patzer
-
-            result = play_game(white, black)
-            score = _result_to_score_perspective_of_patzer(result, patzer_is_white)
-
-            if score == 0.5:
-                outcome_tag = "Patzer draw"
-                total_d += 1
-            elif score == 1.0:
-                outcome_tag = "Patzer win"
-                total_w += 1
+            # Cold start: begin at the weakest opponent available (models tend to be weak early).
+            if games_played == 0:
+                target_elo = int(sf_min)
             else:
-                outcome_tag = "Patzer loss"
-                total_l += 1
+                target_elo = _round_to_step(mu, 10)
+            target_elo = max(int(sf_min), min(int(sf_max), int(target_elo)))
 
-            games_played += 1
-            per_elo.setdefault(target_elo, {"W": 0, "L": 0, "D": 0, "games": 0})
-            per_elo[target_elo]["games"] += 1
-            if score == 1.0:
-                per_elo[target_elo]["W"] += 1
-            elif score == 0.0:
-                per_elo[target_elo]["L"] += 1
+            # Create Stockfish once, then reconfigure Elo between batches.
+            if sf is None:
+                sf = StockfishPlayer(
+                    stockfish_binary,
+                    elo_limit=target_elo,
+                    move_time=getattr(patzer, "_stockfish_move_time", 0.1),
+                )
             else:
-                per_elo[target_elo]["D"] += 1
+                sf.set_elo_limit(target_elo)
 
-            p = _posterior_update(xs, p, target_elo, score)
-            mu2, sigma2 = _posterior_mean_sigma(xs, p)
-            running_score = (total_w + 0.5 * total_d) / games_played
-            color = "W" if patzer_is_white else "B"
-            print(
-                f"  elo={target_elo} [{games_played}/{max_games}] Patzer={color} → {result} ({outcome_tag})"
-                f" | total W-L-D={total_w}-{total_l}-{total_d} score={running_score*100:5.1f}%"
-                f" | estElo={mu2:6.0f}±{sigma2:4.0f}"
-            )
-        sf.close()
+            # Play a small batch at this opponent Elo, alternating colors.
+            for _ in range(batch_size):
+                if games_played >= max_games:
+                    break
+
+                patzer_is_white = games_played % 2 == 0
+                white = patzer if patzer_is_white else sf
+                black = sf if patzer_is_white else patzer
+
+                result = play_game(white, black, timings=timings)
+                score = _result_to_score_perspective_of_patzer(result, patzer_is_white)
+
+                if score == 0.5:
+                    outcome_tag = "Patzer draw"
+                    total_d += 1
+                elif score == 1.0:
+                    outcome_tag = "Patzer win"
+                    total_w += 1
+                else:
+                    outcome_tag = "Patzer loss"
+                    total_l += 1
+
+                games_played += 1
+                per_elo.setdefault(target_elo, {"W": 0, "L": 0, "D": 0, "games": 0})
+                per_elo[target_elo]["games"] += 1
+                if score == 1.0:
+                    per_elo[target_elo]["W"] += 1
+                elif score == 0.0:
+                    per_elo[target_elo]["L"] += 1
+                else:
+                    per_elo[target_elo]["D"] += 1
+
+                p = _posterior_update(xs, p, target_elo, score)
+                mu2, sigma2 = _posterior_mean_sigma(xs, p)
+                running_score = (total_w + 0.5 * total_d) / games_played
+                color = "W" if patzer_is_white else "B"
+                print(
+                    f"  elo={target_elo} [{games_played}/{max_games}] Patzer={color} → {result} ({outcome_tag})"
+                    f" | total W-L-D={total_w}-{total_l}-{total_d} score={running_score*100:5.1f}%"
+                    f" | estElo={mu2:6.0f}±{sigma2:4.0f}"
+                )
+    finally:
+        if sf is not None:
+            sf.close()
+
+    if timings:
+        print("\n[timing] move generation time (sum over plies):")
+        rows = []
+        for name, t in timings.items():
+            plies = int(t.get("plies", 0))
+            secs = float(t.get("secs", 0.0))
+            ms = (secs / plies * 1000.0) if plies else float("nan")
+            rows.append((secs, plies, name, ms))
+        rows.sort(reverse=True)
+        for secs, plies, name, ms in rows:
+            print(f"  {name:<20} {secs:7.2f}s  {plies:5d} plies  ({ms:6.1f} ms/ply)")
 
     records: list[dict] = []
     now = datetime.now(timezone.utc).isoformat()
@@ -355,8 +389,9 @@ def load_results() -> list[dict]:
 
 def aggregate_results(records: list[dict]) -> list[dict]:
     """
-    Combine records with identical (checkpoint, depth, conditioning, temperature, top_k)
-    into single rows by summing W/L/D. This lets you accumulate games across multiple runs.
+    Combine records with identical (checkpoint, iter_num, depth, elo, conditioning, temperature, top_k)
+    into single rows by summing W/L/D. iter_num is part of the key so reusing ckpt.pt at a new training
+    step does not merge with older runs.
     """
     from collections import defaultdict
     agg: dict[tuple, dict] = defaultdict(lambda: {"W": 0, "L": 0, "D": 0})
@@ -365,23 +400,24 @@ def aggregate_results(records: list[dict]) -> list[dict]:
     for r in records:
         key = (
             r["checkpoint"],
+            r.get("iter_num"),
             r.get("stockfish_depth"),
             r.get("stockfish_elo"),
             r.get("conditioning", ""),
-            r.get("temperature", 1.0),
+            r.get("temperature", 0.0),
             r.get("top_k"),
         )
         agg[key]["W"] += r["W"]
         agg[key]["L"] += r["L"]
         agg[key]["D"] += r["D"]
-        meta[key] = {"iter_num": r.get("iter_num", 0), "checkpoint": r["checkpoint"]}
+        meta[key] = {"iter_num": r.get("iter_num"), "checkpoint": r["checkpoint"]}
 
     rows = []
     for key, counts in agg.items():
-        ckpt, depth, elo, cond, temp, top_k = key
+        ckpt, iter_num, depth, elo, cond, temp, top_k = key
         rows.append({
             "checkpoint": ckpt,
-            "iter_num": meta[key]["iter_num"],
+            "iter_num": iter_num,
             "stockfish_depth": depth,
             "stockfish_elo": elo,
             "conditioning": cond,
@@ -390,7 +426,9 @@ def aggregate_results(records: list[dict]) -> list[dict]:
             **counts,
         })
 
-    rows.sort(key=lambda r: (r["checkpoint"], r["stockfish_depth"], r["conditioning"]))
+    rows.sort(
+        key=lambda r: (r["checkpoint"], r.get("iter_num") or 0, r["stockfish_depth"], r["conditioning"])
+    )
     return rows
 
 
@@ -415,8 +453,9 @@ def estimate_model_elo(records: list[dict]) -> list[dict]:
         key = (
             r["checkpoint"],
             r.get("conditioning", ""),
-            r.get("temperature", 1.0),
+            r.get("temperature", 0.0),
             r.get("top_k"),
+            r.get("iter_num"),
         )
         grouped.setdefault(key, []).append(
             {
@@ -469,6 +508,7 @@ def estimate_model_elo(records: list[dict]) -> list[dict]:
                 "conditioning": key[1],
                 "temperature": key[2],
                 "top_k": key[3],
+                "iter_num": key[4],
                 "elo_estimate": mu,
                 "elo_sigma": sigma,
                 "n_points": len(pts),
@@ -477,7 +517,7 @@ def estimate_model_elo(records: list[dict]) -> list[dict]:
             }
         )
 
-    estimates.sort(key=lambda r: (r["checkpoint"], r["conditioning"]))
+    estimates.sort(key=lambda r: (r["checkpoint"], r.get("iter_num") or 0, r["conditioning"]))
     return estimates
 
 
@@ -497,12 +537,8 @@ def show_elo_estimates():
         ckpt = _checkpoint_label(r["checkpoint"])
         elo = "n/a" if r["elo_estimate"] is None else f"{r['elo_estimate']:.0f}"
         sig = "n/a" if r.get("elo_sigma") is None else f"{r['elo_sigma']:.0f}"
-        # Look up a representative iter_num for display.
-        iter_num = "?"
-        for rec in records:
-            if rec.get("checkpoint") == r["checkpoint"]:
-                iter_num = rec.get("iter_num", "?")
-                break
+        it = r.get("iter_num")
+        iter_num = "?" if it is None else str(it)
         print(
             f"{ckpt:<18} {iter_num:>6} {r['conditioning']:<12} {r['temperature']:>4.1f} "
             f"{r['total_games']:>6} {r['n_points']:>4} {elo:>8} ± {sig:>4} {r['method']:<14}"
@@ -517,14 +553,15 @@ def show_results():
     # Model-centric summary (aligned with adaptive Elo evaluation).
     from collections import defaultdict
 
-    # Keyed by (checkpoint, conditioning, temperature, top_k)
+    # Keyed by (checkpoint, conditioning, temperature, top_k, iter_num)
     totals: dict[tuple, dict] = defaultdict(lambda: {"W": 0, "L": 0, "D": 0, "iter_num": "?"})
     for r in records:
         key = (
             r.get("checkpoint"),
             r.get("conditioning", ""),
-            r.get("temperature", 1.0),
+            r.get("temperature", 0.0),
             r.get("top_k"),
+            r.get("iter_num"),
         )
         totals[key]["W"] += int(r.get("W", 0))
         totals[key]["L"] += int(r.get("L", 0))
@@ -535,12 +572,12 @@ def show_results():
     # Attach Elo estimates where available.
     est_map: dict[tuple, dict] = {}
     for e in estimate_model_elo(records):
-        k = (e["checkpoint"], e["conditioning"], e["temperature"], e["top_k"])
+        k = (e["checkpoint"], e["conditioning"], e["temperature"], e["top_k"], e.get("iter_num"))
         est_map[k] = e
 
     rows = []
     for key, c in totals.items():
-        ckpt, cond, temp, top_k = key
+        ckpt, cond, temp, top_k, _iter_part = key
         total = c["W"] + c["L"] + c["D"]
         score = (c["W"] + 0.5 * c["D"]) / total * 100 if total else 0.0
         e = est_map.get(key, {})
@@ -605,9 +642,16 @@ def main():
     parser.add_argument("--stop-sigma", type=float, default=35, help="Stop once posterior stddev <= this")
     parser.add_argument("--grid-step", type=int, default=10, help="Elo grid step size for posterior")
     parser.add_argument("--stockfish", default="/opt/homebrew/bin/stockfish")
-    parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--device", default="cpu", help="torch device: cpu | mps | cuda")
+    parser.add_argument("--timing", action="store_true", help="Print per-move timing breakdown")
+    parser.add_argument(
+        "--sf-move-time",
+        type=float,
+        default=0.05,
+        help="Seconds per Stockfish move when using ELO-limited mode (lower = faster)",
+    )
     parser.add_argument(
         "--conditioning",
         default="match_color",
@@ -686,6 +730,9 @@ def main():
         top_k=args.top_k,
         conditioning=args.conditioning,
     )
+    # Lightweight timing collection toggle. Stored on instance to avoid changing class API.
+    patzer._collect_timings = bool(args.timing)
+    patzer._stockfish_move_time = float(args.sf_move_time)
 
     records = run_adaptive_elo_tournament(
         patzer,

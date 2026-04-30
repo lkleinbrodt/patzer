@@ -284,8 +284,8 @@ Training started on instance {instance_id}.
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="train_patzer",
-                        help="Config filename without .py (default: train_patzer)")
+    parser.add_argument("--config", required=True,
+                        help="Config filename without .py (e.g. train_patzer_v3)")
     parser.add_argument("--resume", action="store_true",
                         help="Pull R2 checkpoint before training (pass init_from=resume)")
     parser.add_argument("--instance", type=int, metavar="ID",

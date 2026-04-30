@@ -166,7 +166,7 @@ def main() -> None:
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--device", default=None)
     ap.add_argument("--color", choices=["white", "black"], default="white")
-    ap.add_argument("--temperature", type=float, default=0.1)
+    ap.add_argument("--temperature", type=float, default=0.0)
     args = ap.parse_args()
 
     if args.device is None:

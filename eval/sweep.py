@@ -260,7 +260,7 @@ def main():
     parser.add_argument("--games", type=int, default=20,
                         help="Games per checkpoint per depth")
     parser.add_argument("--stockfish", default="/opt/homebrew/bin/stockfish")
-    parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--device", default="cpu", help="cpu | mps | cuda")
     parser.add_argument("--conditioning", default="match_color",

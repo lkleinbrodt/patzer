@@ -34,7 +34,7 @@ class Patzer:
         self,
         checkpoint_path: str | Path,
         device: str = "cpu",
-        temperature: float = 0.1,
+        temperature: float = 0.0,
         top_k: int | None = None,
         conditioning: str = "match_color",
     ):
@@ -146,27 +146,43 @@ class Patzer:
 
 
 class StockfishPlayer:
-    def __init__(self, binary_path: str, depth: int | None = None, elo_limit: int | None = None):
+    def __init__(
+        self,
+        binary_path: str,
+        depth: int | None = None,
+        elo_limit: int | None = None,
+        move_time: float = 0.05,
+    ):
         import chess.engine
         assert depth is not None or elo_limit is not None, "Provide depth or elo_limit"
         self.depth = depth
         self.elo_limit = elo_limit
+        self.move_time = float(move_time)
         self.engine = chess.engine.SimpleEngine.popen_uci(binary_path)
         if elo_limit is not None:
             # Some Stockfish builds enforce a minimum/maximum UCI_Elo. Clamp so callers
             # (e.g. smart ELO sweeps) don't crash when probing outside the supported range.
-            try:
-                opt = self.engine.options.get("UCI_Elo")
-                if opt is not None:
-                    if opt.min is not None:
-                        elo_limit = max(int(opt.min), int(elo_limit))
-                    if opt.max is not None:
-                        elo_limit = min(int(opt.max), int(elo_limit))
-            except Exception:
-                # If option introspection fails, fall back to requested value.
-                pass
-            self.elo_limit = elo_limit
-            self.engine.configure({"UCI_LimitStrength": True, "UCI_Elo": elo_limit})
+            self.set_elo_limit(elo_limit)
+
+    def set_elo_limit(self, elo_limit: int) -> None:
+        """
+        Update Elo-limited strength without restarting the engine process.
+        No-op if this player was created with depth-based limits instead.
+        """
+        if self.depth is not None:
+            return
+        try:
+            opt = self.engine.options.get("UCI_Elo")
+            if opt is not None:
+                if opt.min is not None:
+                    elo_limit = max(int(opt.min), int(elo_limit))
+                if opt.max is not None:
+                    elo_limit = min(int(opt.max), int(elo_limit))
+        except Exception:
+            # If option introspection fails, fall back to requested value.
+            pass
+        self.elo_limit = int(elo_limit)
+        self.engine.configure({"UCI_LimitStrength": True, "UCI_Elo": int(elo_limit)})
 
     @property
     def name(self) -> str:
@@ -176,7 +192,11 @@ class StockfishPlayer:
 
     def get_move(self, board: chess.Board, move_history: list[str]) -> str:
         import chess.engine
-        limit = chess.engine.Limit(depth=self.depth) if self.elo_limit is None else chess.engine.Limit(time=0.1)
+        limit = (
+            chess.engine.Limit(depth=self.depth)
+            if self.elo_limit is None
+            else chess.engine.Limit(time=self.move_time)
+        )
         result = self.engine.play(board, limit)
         return result.move.uci()
 

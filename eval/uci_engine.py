@@ -85,7 +85,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Patzer UCI engine wrapper")
     parser.add_argument("--checkpoint", required=True, help="Path to checkpoint .pt file")
     parser.add_argument("--device", default="cpu", help="torch device: cpu | mps | cuda")
-    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument(
         "--conditioning",

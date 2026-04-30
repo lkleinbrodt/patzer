@@ -41,7 +41,11 @@ log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
-r2_history_ckpt_interval = 5000 # push ckpt_{iter}.pt to R2 every N steps (ckpt.pt is still pushed each eval)
+# Save the "latest" checkpoint (`ckpt.pt`) at most every N steps (0 = every eval).
+# `ckpt_best.pt` is still written whenever val improves.
+ckpt_save_interval = 0
+# push ckpt_{iter}.pt to R2 every N steps (0 = disabled). This only runs when we saved `ckpt.pt` that step.
+r2_history_ckpt_interval = 5000
 # Early stopping on val loss (0 = disabled). Counts consecutive evals without val improvement.
 early_stop_patience_evals = 0
 early_stop_min_iters = 0 # require at least this many steps before early stop can trigger
@@ -315,8 +319,15 @@ while True:
                 evals_without_improvement = 0
             else:
                 evals_without_improvement += 1
-        if val_loss < best_val_loss or always_save_checkpoint:
-            best_val_loss = min(best_val_loss, val_loss)
+        # Save behavior:
+        # - `ckpt_best.pt` on *any* val improvement
+        # - `ckpt.pt` ("latest") at most every `ckpt_save_interval` steps (or every eval if interval == 0)
+        save_latest = False
+        if always_save_checkpoint and iter_num > 0:
+            save_latest = (ckpt_save_interval == 0) or (iter_num % ckpt_save_interval == 0)
+        if improved or save_latest:
+            if improved:
+                best_val_loss = val_loss
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -328,18 +339,19 @@ while True:
                     'evals_without_improvement': evals_without_improvement,
                     'config': config,
                 }
-                print(f"saving checkpoint to {out_dir}")
-                ckpt_local = os.path.join(out_dir, 'ckpt.pt')
-                torch.save(checkpoint, ckpt_local)
-                r2.push_file(ckpt_local)
-                # Best val weights only (for play/eval); ckpt.pt stays latest for resume when always_save_checkpoint.
+                if save_latest:
+                    print(f"saving checkpoint to {out_dir}")
+                    ckpt_local = os.path.join(out_dir, 'ckpt.pt')
+                    torch.save(checkpoint, ckpt_local)
+                    r2.push_file(ckpt_local)
+                    # optionally push a stamped copy so R2 preserves some history
+                    if r2_history_ckpt_interval and (iter_num % r2_history_ckpt_interval == 0):
+                        r2.push_file(ckpt_local, f"{out_dir}/ckpt_{iter_num:06d}.pt")
                 if improved:
+                    # Best val weights only (for play/eval); latest resume checkpoint is `ckpt.pt`.
                     best_ckpt_local = os.path.join(out_dir, 'ckpt_best.pt')
                     torch.save(checkpoint, best_ckpt_local)
                     r2.push_file(best_ckpt_local)
-                # optionally push a stamped copy so R2 preserves some history across evals
-                if r2_history_ckpt_interval and (iter_num % r2_history_ckpt_interval == 0):
-                    r2.push_file(ckpt_local, f"{out_dir}/ckpt_{iter_num:06d}.pt")
     if ddp and iter_num % eval_interval == 0:
         sync = torch.tensor([evals_without_improvement], dtype=torch.int, device=device)
         broadcast(sync, src=0)

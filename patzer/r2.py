@@ -9,6 +9,7 @@ Usage:
   python r2.py push data/prepared          # upload all files in a local dir
   python r2.py pull data/prepared          # download all objects under that prefix
   python r2.py push checkpoints/patzer_v0  # upload a checkpoint dir
+  python r2.py copy src/r2/key dst/r2/key  # server-side duplicate in bucket [--force]
 """
 
 import os
@@ -117,10 +118,34 @@ def checkpoint_exists(r2_key: str) -> bool:
         return False
 
 
+def copy_object(src_key: str, dst_key: str, *, overwrite: bool = False) -> bool:
+    """
+    Server-side copy within the same R2 bucket (no local download).
+
+    src_key / dst_key use forward slashes, e.g. checkpoints/patzer_v1/ckpt.pt
+    """
+    client, bucket = _client()
+    if client is None:
+        return False
+    src_key = str(src_key).lstrip("/")
+    dst_key = str(dst_key).lstrip("/")
+    if not overwrite and checkpoint_exists(dst_key):
+        print(f"[r2] copy skipped: destination already exists: {dst_key}", file=sys.stderr)
+        return False
+    print(f"[r2] copying s3://{bucket}/{src_key} → s3://{bucket}/{dst_key}")
+    client.copy_object(
+        Bucket=bucket,
+        CopySource={"Bucket": bucket, "Key": src_key},
+        Key=dst_key,
+    )
+    return True
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 3 or sys.argv[1] not in ("push", "pull"):
+    if len(sys.argv) < 3 or sys.argv[1] not in ("push", "pull", "copy"):
         print("usage: python r2.py push <local_dir>")
         print("       python r2.py pull <r2_prefix> [local_dir]")
+        print("       python r2.py copy <src_r2_key> <dst_r2_key> [--force]")
         sys.exit(1)
     cmd = sys.argv[1]
     if cmd == "push":
@@ -128,3 +153,10 @@ if __name__ == "__main__":
     elif cmd == "pull":
         local = sys.argv[3] if len(sys.argv) > 3 else None
         pull_dir(sys.argv[2], local)
+    elif cmd == "copy":
+        if len(sys.argv) < 4:
+            print("usage: python r2.py copy <src_r2_key> <dst_r2_key> [--force]", file=sys.stderr)
+            sys.exit(1)
+        force = "--force" in sys.argv
+        ok = copy_object(sys.argv[2], sys.argv[3], overwrite=force)
+        sys.exit(0 if ok else 1)
