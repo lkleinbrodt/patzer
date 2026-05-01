@@ -65,3 +65,5 @@ I want to write one (or many) blog posts about this project. So we should keep a
 - **2026-04-30:** `bot/configs/patzer_v1.yml` & `patzer_v2.yml`: aligned **`challenge`** (briefly included classical) and **`matchmaking`** with the main `lichess-bot/config.yml` (matchmaking on, standard variant, 1‑minute idle timeout, 60/120/180 + 0/1/2 clocks, `opponent_max_rating: 2000`, rated + `coarse` filter). Deploy-specific bits (empty token, `engine.dir: "."`, homemade options) unchanged.
 
 - **2026-04-30:** Bot configs: removed **`classical`** from `challenge.time_controls` in `patzer_v1.yml` / `patzer_v2.yml` (accept bullet/blitz/rapid only).
+
+- **2026-04-30:** `pipeline/prepare.py` logs progress on **stderr**: sampled **line-count estimate** (bytes ÷ sampled bytes/line), per-input **file banners** with size, a throttled **progress bar** (% of corpus lines scanned), **games/s**, **ETA** (exact when `--max-games` or boundary pass 2 knows total train+val games from pass 1; otherwise inferred from keep ratio × estimate), optional **ANSI** styling (respects `NO_COLOR` / non‑TTY uses newline logs instead of `\r`).

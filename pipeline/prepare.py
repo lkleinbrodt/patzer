@@ -29,6 +29,169 @@ from patzer.tokenizer import ChessTokenizer
 _WORKER_TOK = None
 
 
+def _use_ansi() -> bool:
+    if not sys.stderr.isatty():
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    term = os.environ.get("TERM", "")
+    return term != "dumb"
+
+
+def _c(s: str, *codes: str) -> str:
+    if not codes or not _use_ansi():
+        return s
+    return "".join(codes) + s + "\033[0m"
+
+
+def _fmt_duration(seconds: float) -> str:
+    if not (seconds == seconds):  # NaN
+        return "—"
+    if seconds < 0:
+        seconds = 0
+    if seconds < 1:
+        return "<1s"
+    sec = int(round(seconds))
+    if sec < 60:
+        return f"{sec}s"
+    m, s = divmod(sec, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
+def _fmt_int_per_sec(rate: float) -> str:
+    if not (rate > 0) or not (rate == rate):
+        return "—"
+    if rate >= 1_000_000:
+        return f"{rate/1e6:.2f}M/s"
+    if rate >= 1_000:
+        return f"{rate/1e3:.1f}k/s"
+    return f"{rate:.0f}/s"
+
+
+def _sample_avg_bytes_per_line(path: Path, max_bytes: int = 393_216) -> float:
+    """
+    Estimate average encoded line length (bytes) by reading a prefix of `path`.
+    Falls back if the sample has too few lines.
+    """
+    if not path.is_file():
+        return 120.0
+    try:
+        with open(path, "rb") as f:
+            blob = f.read(max_bytes)
+    except OSError:
+        return 120.0
+    if not blob:
+        return 120.0
+    n_nl = blob.count(b"\n")
+    if n_nl < 8:
+        return max(72.0, min(384.0, len(blob)))
+    avg = len(blob) / max(1, n_nl)
+    return max(48.0, min(512.0, float(avg)))
+
+
+def estimate_total_lines(paths: list[str]) -> tuple[int, float]:
+    """
+    Fast line-count estimate using file sizes ÷ sampled average bytes/line.
+
+    Returns (estimated_lines, avg_bytes_per_line_used).
+    """
+    path_objs = [Path(p) for p in paths]
+    sizes = [(p, p.stat().st_size) for p in path_objs if p.is_file()]
+    total_bytes = sum(sz for _, sz in sizes)
+    if total_bytes <= 0:
+        return max(1, len(paths)), 120.0
+    avg_bpl = 120.0
+    for p, _sz in sizes:
+        avg_bpl = _sample_avg_bytes_per_line(p)
+        break
+    est_lines = max(1, int(total_bytes / avg_bpl))
+    return est_lines, avg_bpl
+
+
+class PipelineProgressReporter:
+    """
+    Throttled stderr progress: line scan %, throughput, EWMA ETA for games.
+    """
+
+    def __init__(
+        self,
+        label: str,
+        *,
+        est_total_lines: int,
+        exact_total_games: int | None,
+        min_interval_s: float = 0.35,
+    ):
+        self.label = label
+        self.est_total_lines = max(1, est_total_lines)
+        self.exact_total_games = exact_total_games
+        self.min_interval_s = min_interval_s
+        self._t0 = time.time()
+        self._last_emit = 0.0
+        self.lines_seen = 0
+        self.chunk_count = 0
+        self.games_processed = 0
+
+    def on_chunk_finish(self, chunk_line_count: int, games_kept_or_written_delta: int) -> None:
+        self.lines_seen += chunk_line_count
+        self.chunk_count += 1
+        self.games_processed += games_kept_or_written_delta
+        self.maybe_emit(force=False)
+
+    def maybe_emit(self, *, force: bool) -> None:
+        now = time.time()
+        if not force and (now - self._last_emit) < self.min_interval_s:
+            return
+        elapsed = max(1e-6, now - self._t0)
+        self._last_emit = now
+
+        line_pct = min(100.0, 100.0 * self.lines_seen / self.est_total_lines)
+        bar_w = 18
+        filled = int(bar_w * line_pct / 100.0)
+        bar_inner = _c("█" * filled, "\033[32m") + _c("░" * (bar_w - filled), "\033[2m")
+
+        g_rate = self.games_processed / elapsed
+        lg = self.label
+        lg = _c(lg, "\033[1m")
+
+        denom_games = self.exact_total_games
+        if denom_games is None and self.lines_seen > 0:
+            ratio = self.games_processed / self.lines_seen
+            denom_games = max(float(self.games_processed), ratio * self.est_total_lines)
+
+        pct_games_txt = ""
+        eta_sec = None
+        if denom_games is not None and denom_games > 0:
+            pg = min(100.0, 100.0 * self.games_processed / denom_games)
+            pct_games_txt = f" │ games {pg:4.1f}%"
+            rem = float(denom_games) - float(self.games_processed)
+            if rem > 0 and g_rate > 0:
+                eta_sec = rem / g_rate
+
+        eta_txt = _fmt_duration(eta_sec) if eta_sec is not None else "—"
+
+        cyan = "\033[36m"
+        tty = sys.stderr.isatty()
+        leader = "\r" if tty else ""
+        pad = "    " if tty else ""
+        msg = (
+            f"{leader}{lg} │{bar_inner}│ {line_pct:5.1f}% lines │ "
+            f"{self.games_processed:,} games │ {_fmt_int_per_sec(g_rate)} │ "
+            f"ETA {_c(eta_txt, cyan)} │ {_fmt_duration(elapsed)} elapsed{pct_games_txt}"
+            f"{pad}"
+        )
+
+        sys.stderr.write(msg)
+        if (not tty) or force:
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+
+    def finish(self) -> None:
+        self.maybe_emit(force=True)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -102,7 +265,7 @@ def _encode_line(line: str) -> list[int] | None:
         return None
 
 
-def _count_chunk_parse_only(lines: list[str]) -> tuple[int, int]:
+def _count_chunk_parse_only(lines: list[str]) -> tuple[int, int, int]:
     kept = 0
     skipped = 0
     for line in lines:
@@ -110,10 +273,11 @@ def _count_chunk_parse_only(lines: list[str]) -> tuple[int, int]:
             skipped += 1
         else:
             kept += 1
-    return kept, skipped
+    n_lines = len(lines)
+    return kept, skipped, n_lines
 
 
-def _tokenize_chunk(lines: list[str]) -> tuple[list[list[int]], int]:
+def _tokenize_chunk(lines: list[str]) -> tuple[list[list[int]], int, int]:
     games: list[list[int]] = []
     skipped = 0
     for line in lines:
@@ -122,10 +286,13 @@ def _tokenize_chunk(lines: list[str]) -> tuple[list[list[int]], int]:
             skipped += 1
             continue
         games.append(token_ids)
-    return games, skipped
+    n_lines = len(lines)
+    return games, skipped, n_lines
 
 
-def _tokenize_chunk_with_lines(lines: list[str]) -> tuple[list[tuple[str, list[int]]], int]:
+def _tokenize_chunk_with_lines(
+    lines: list[str],
+) -> tuple[list[tuple[str, list[int]]], int, int]:
     games: list[tuple[str, list[int]]] = []
     skipped = 0
     for line in lines:
@@ -134,7 +301,8 @@ def _tokenize_chunk_with_lines(lines: list[str]) -> tuple[list[tuple[str, list[i
             skipped += 1
             continue
         games.append((line, token_ids))
-    return games, skipped
+    n_lines = len(lines)
+    return games, skipped, n_lines
 
 
 def _stable_split_value(line: str, seed: int) -> float:
@@ -143,11 +311,30 @@ def _stable_split_value(line: str, seed: int) -> float:
     return int.from_bytes(digest, "big") / float(2**128)
 
 
-def iter_line_chunks(input_files: list[str], chunk_lines: int, phase: str | None = None):
+def iter_line_chunks(
+    input_files: list[str],
+    chunk_lines: int,
+    *,
+    label: str = "",
+):
     chunk: list[str] = []
-    prefix = f"[{phase}] " if phase else ""
-    for input_path in input_files:
-        print(f"{prefix}Scanning {Path(input_path).name}...")
+    n_files = len(input_files)
+    for idx, input_path in enumerate(input_files):
+        p = Path(input_path)
+        try:
+            size_mb = p.stat().st_size / (1024 * 1024)
+        except OSError:
+            size_mb = 0.0
+        lbl = label or "read"
+        hdr = (
+            _c("[prepare]", "\033[2m")
+            + " "
+            + _c(lbl, "\033[1m")
+            + f"  file {idx + 1}/{n_files}: {p.name}  "
+            + _c(f"({size_mb:.1f} MiB)", "\033[2m")
+        )
+        sys.stderr.write(hdr + "\n")
+        sys.stderr.flush()
         with open(input_path, "r") as f:
             for line in f:
                 chunk.append(line)
@@ -232,6 +419,19 @@ def main():
     print(f"Chunk:      {args.chunk_lines:,} lines")
     print(f"Split mode: {args.split_mode}\n")
 
+    est_lines, avg_bpl = estimate_total_lines(input_files)
+    if _use_ansi():
+        sys.stderr.write(
+            "\033[2m[prepare]\033[0m"
+            f" ~{est_lines:,} lines estimated · sampled avg {avg_bpl:.0f} B/line"
+            "\n"
+        )
+    else:
+        sys.stderr.write(
+            f"[prepare] ~{est_lines:,} lines estimated · sampled avg {avg_bpl:.0f} B/line\n"
+        )
+    sys.stderr.flush()
+
     train_writer = BufferedBinWriter(output_dir / "train.bin", args.flush_tokens)
     val_writer = BufferedBinWriter(output_dir / "val.bin", args.flush_tokens)
 
@@ -252,37 +452,48 @@ def main():
 
     try:
         if args.split_mode == "boundary":
-            print("Pass 1/2: counting valid games for boundary split...")
+            print("Pass 1/2: counting valid games for boundary split…")
             parse_skipped = 0
-            chunks = iter_line_chunks(input_files, args.chunk_lines, phase="pass1")
+            prog1 = PipelineProgressReporter(
+                "Pass 1/2 · count valid games",
+                est_total_lines=est_lines,
+                exact_total_games=None,
+            )
+            chunks = iter_line_chunks(input_files, args.chunk_lines, label="Pass 1/2 · read")
             if executor:
                 count_results = executor.map(_count_chunk_parse_only, chunks, chunksize=4)
             else:
                 count_results = map(_count_chunk_parse_only, chunks)
-            for kept, skipped in count_results:
+            for kept, skipped, n_lines in count_results:
                 total_kept += kept
                 parse_skipped += skipped
-                if args.max_games and total_kept >= args.max_games:
-                    total_kept = args.max_games
-                    break
-                if total_kept and total_kept % 500_000 == 0:
-                    print(f"  Counted {total_kept:,} kept games...")
-            print(f"  Parse-only pass counted {parse_skipped:,} malformed lines (not included in final skipped metric).")
+                prog1.on_chunk_finish(n_lines, kept)
+            prog1.finish()
+            print(
+                f"  Parse-only pass: {parse_skipped:,} malformed lines "
+                "(not included in final skipped metric)."
+            )
 
             n_val = max(1, int(total_kept * args.val_fraction))
             n_train = total_kept - n_val
             split_boundary = n_train
             print(f"Boundary split: train={n_train:,}, val={n_val:,}")
 
-            print("\nPass 2/2: tokenizing + streaming write...")
+            print("\nPass 2/2: tokenizing + streaming write…")
             seen_games = 0
-            chunks = iter_line_chunks(input_files, args.chunk_lines, phase="pass2")
+            prog2 = PipelineProgressReporter(
+                "Pass 2/2 · tokenize & write",
+                est_total_lines=est_lines,
+                exact_total_games=total_kept,
+            )
+            chunks = iter_line_chunks(input_files, args.chunk_lines, label="Pass 2/2 · read")
             if executor:
                 tok_results = executor.map(_tokenize_chunk, chunks, chunksize=4)
             else:
                 tok_results = map(_tokenize_chunk, chunks)
-            for games, encode_skipped in tok_results:
+            for games, encode_skipped, n_lines in tok_results:
                 total_skipped += encode_skipped
+                written_this_chunk = 0
                 for token_ids in games:
                     if args.max_games and seen_games >= args.max_games:
                         break
@@ -291,35 +502,42 @@ def main():
                     else:
                         val_writer.append(token_ids)
                     seen_games += 1
-                    if seen_games % 200_000 == 0:
-                        elapsed = time.time() - start
-                        print(f"  Written {seen_games:,} games ({elapsed:.1f}s)")
+                    written_this_chunk += 1
+                prog2.on_chunk_finish(n_lines, written_this_chunk)
                 if args.max_games and seen_games >= args.max_games:
                     break
+            prog2.finish()
         else:
             # Hash split is one-pass and deterministic by (seed, line content).
-            print("One-pass hash split: tokenizing + streaming write...")
-            chunks = iter_line_chunks(input_files, args.chunk_lines, phase="pass1")
+            print("One-pass hash split: tokenizing + streaming write…")
+            exact_cap = args.max_games if args.max_games is not None else None
+            prog = PipelineProgressReporter(
+                "Hash split · tokenize & write",
+                est_total_lines=est_lines,
+                exact_total_games=exact_cap,
+            )
+            chunks = iter_line_chunks(input_files, args.chunk_lines, label="Hash split · read")
             if executor:
                 tok_results = executor.map(_tokenize_chunk_with_lines, chunks, chunksize=4)
             else:
                 tok_results = map(_tokenize_chunk_with_lines, chunks)
 
-            for games, skipped in tok_results:
+            for games, skipped, n_lines in tok_results:
                 total_skipped += skipped
+                kept_this_chunk = 0
                 for line, token_ids in games:
                     if args.max_games and total_kept >= args.max_games:
                         break
                     total_kept += 1
+                    kept_this_chunk += 1
                     if _stable_split_value(line, args.seed) < args.val_fraction:
                         val_writer.append(token_ids)
                     else:
                         train_writer.append(token_ids)
-                    if total_kept % 200_000 == 0:
-                        elapsed = time.time() - start
-                        print(f"  Written {total_kept:,} games ({elapsed:.1f}s)")
+                prog.on_chunk_finish(n_lines, kept_this_chunk)
                 if args.max_games and total_kept >= args.max_games:
                     break
+            prog.finish()
     finally:
         if executor:
             executor.shutdown(wait=True)
@@ -333,7 +551,8 @@ def main():
     train_tokens = train_writer.tokens_written
     val_tokens = val_writer.tokens_written
 
-    print(f"\nDone. {total_kept:,} games tokenized, {total_skipped:,} skipped.")
+    wall_s = time.time() - start
+    print(f"\nDone ({_fmt_duration(wall_s)}). {total_kept:,} games tokenized, {total_skipped:,} skipped.")
     print(f"Train games: {n_train:,}")
     print(f"Val games:   {n_val:,}")
     print(f"train.bin:   {train_tokens:,} tokens ({(output_dir / 'train.bin').stat().st_size / 1e6:.1f} MB)")

@@ -139,6 +139,31 @@ def cmd_install_shim(lichess_home: Path, dry_run: bool) -> None:
     dst.symlink_to(src)
 
 
+def cmd_upgrade(label: str, lichess_home: Path, dry_run: bool) -> None:
+    cfg = resolve_config_path(label)
+    lichess_py = lichess_home / "lichess-bot.py"
+    if not lichess_py.is_file():
+        raise FileNotFoundError(
+            f"lichess-bot.py not found in {lichess_home}. Clone lichess-bot or set LICHESS_BOT_HOME."
+        )
+
+    patzer_root = os.environ.get("PATZER_ROOT", str(repo_root()))
+    python = pick_python(lichess_home)
+    argv = [python, str(lichess_py), "--config", str(cfg.resolve()), "-u"]
+    print("Upgrading account for", label)
+    print("exec:", " ".join(argv))
+    if dry_run:
+        return
+
+    token = resolve_token(label, cfg)
+    env = os.environ.copy()
+    env["PATZER_ROOT"] = patzer_root
+    env["LICHESS_BOT_TOKEN"] = token
+
+    os.chdir(lichess_home)
+    subprocess.run(argv, env=env, check=True)
+
+
 def cmd_run(label: str, lichess_home: Path, dry_run: bool) -> None:
     cfg = resolve_config_path(label)
     lichess_py = lichess_home / "lichess-bot.py"
@@ -184,6 +209,13 @@ def main() -> None:
         help="Symlink bot/templates/homemade_shim.py into lichess-bot/homemade.py (one-time setup)",
     )
 
+    p_upgrade = sub.add_parser(
+        "upgrade",
+        parents=[parent],
+        help="Upgrade a Lichess account to a bot account (irreversible)",
+    )
+    p_upgrade.add_argument("label", nargs="?", default="v1", help="Config name: v1, v2, …")
+
     p_run = sub.add_parser(
         "run",
         parents=[parent],
@@ -206,6 +238,11 @@ def main() -> None:
 
     if args.command == "install-shim":
         cmd_install_shim(home, args.dry_run)
+        return
+
+    if args.command == "upgrade":
+        label = normalize_label(args.label)
+        cmd_upgrade(label, home, args.dry_run)
         return
 
     if args.command == "run":

@@ -6,14 +6,16 @@ v3 is doing great. **Let it run.** It's at val 1.563 vs v2's best of 1.652 — a
 
 The numbers tell a clean story:
 
-| milestone | v3 reached at | v2 reached at | speedup |
-|---|---|---|---|
-| val ≤ 2.0 | iter 7k | iter 16k | 2.3× |
-| val ≤ 1.8 | iter 19k | iter 84k | 4.4× |
-| val ≤ 1.7 | iter 44k | iter 126k | 2.9× |
-| val ≤ 1.65 | iter 69k | (never) | — |
-| val ≤ 1.60 | iter 93k | (never) | — |
-| current best val | **1.563** at iter 111k | 1.650 (best ever) | — |
+
+| milestone        | v3 reached at          | v2 reached at     | speedup |
+| ---------------- | ---------------------- | ----------------- | ------- |
+| val ≤ 2.0        | iter 7k                | iter 16k          | 2.3×    |
+| val ≤ 1.8        | iter 19k               | iter 84k          | 4.4×    |
+| val ≤ 1.7        | iter 44k               | iter 126k         | 2.9×    |
+| val ≤ 1.65       | iter 69k               | (never)           | —       |
+| val ≤ 1.60       | iter 93k               | (never)           | —       |
+| current best val | **1.563** at iter 111k | 1.650 (best ever) | —       |
+
 
 Per-iter pace right now: ~0.018 nats per 10k iters between iter 100k → 110k, with LR currently at ~1e-4 and still cosine-decaying. The generalization gap is +0.0165 — a touch wider than v2's near-zero, but normal for a 3.3× larger model on the same data, and **not a sign of overfitting**, just of reduced underfitting. Confirms the earlier read: v2 was capacity-bound at 12M, and v3 has unlocked real headroom.
 
@@ -51,6 +53,7 @@ There's no single right answer, but here's what's well-supported and what your o
 **How long to train, in general.** You answer this empirically per-model: train until val plateaus at noise floor while LR is still meaningfully nonzero. Your v2 noise floor on val_loss is ~0.007 nats with `eval_iters=200`. So "plateau" means improvements <0.015 nats over ~20k iters. Early stopping with `patience=15 evals` is a reasonable automatic version of this; you can also just eyeball it.
 
 For chess transformers specifically, your data points so far suggest:
+
 - 12M (v2): plateaus at ~200k iters / ~7 epochs / ~6.5B tokens
 - 40M (v3): probably plateaus around ~150–170k iters but learning more per iter; will need a fresh run to confirm with a properly aligned schedule
 
