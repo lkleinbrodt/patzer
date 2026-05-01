@@ -1,5 +1,5 @@
-# Patzer v1 — use LICHESS_BOT_TOKEN in the environment (recommended) or token below.
-# Override locally: copy to patzer_v1.local.yml (gitignored).
+# Patzer v2 — use LICHESS_BOT_TOKEN in the environment (recommended) or token below.
+# Override locally: copy to patzer_v2.local.yml (gitignored).
 
 token: ""
 url: "https://lichess.org/"
@@ -46,7 +46,7 @@ engine:
       enabled: false
       paths: []
   homemade_options:
-    patzer_checkpoint: "checkpoints/patzer_v1/weights_best.pt"
+    patzer_checkpoint: "checkpoints/patzer_v3/weights_best.pt"
     device: "auto"
     temperature: 0
     conditioning: "match_color"
@@ -72,7 +72,6 @@ challenge:
     - blitz
     - rapid
   modes:
-    - casual
     - rated
   bullet_requires_increment: false
   max_simultaneous_games_per_user: 5
@@ -87,7 +86,7 @@ matchmaking:
   allow_matchmaking: true
   allow_during_games: true
   challenge_variant: "standard"
-  challenge_timeout: 1
+  challenge_timeout: 0
   challenge_initial_time:
     - 60
     - 120
@@ -103,5 +102,5 @@ matchmaking:
   include_challenge_block_list: false
 
 greeting:
-  hello: "Hi! I'm Patzer v1, I don't know the rules of chess but I've watched a lot of games."
+  hello: "Hi! I'm Patzer v3, I don't know the rules of chess but I've watched a lot of games."
   goodbye: "Good game!"

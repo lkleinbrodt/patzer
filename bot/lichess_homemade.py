@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import time
 import sys
 from pathlib import Path
 
@@ -59,6 +61,13 @@ def _opt_str(options: dict, key: str) -> str | None:
     return str(v)
 
 
+def _opt_float(options: dict, key: str) -> float | None:
+    v = options.get(key)
+    if v is None:
+        return None
+    return float(v)
+
+
 class PatzerEngine(MinimalEngine):
     """Patzer GPT — checkpoint and device from engine.homemade_options."""
 
@@ -75,6 +84,10 @@ class PatzerEngine(MinimalEngine):
         device = _pick_device(_opt_str(options, "device"))
         temperature = float(_opt_str(options, "temperature") or "0")
         conditioning = _opt_str(options, "conditioning") or "match_color"
+        # Default to a tiny delay to prevent bursty move submissions triggering 429s
+        # (especially in bullet with high concurrency and near-instant engines).
+        self.min_think_ms = int(_opt_float(options, "min_think_ms") or 50)
+        self.think_jitter_ms = int(_opt_float(options, "think_jitter_ms") or 50)
 
         logger.info("PatzerEngine loading checkpoint=%s device=%s", ckpt_path, device)
         self.patzer = Patzer(
@@ -86,6 +99,9 @@ class PatzerEngine(MinimalEngine):
         )
 
     def search(self, board: chess.Board, *args) -> PlayResult:
+        if self.min_think_ms > 0:
+            jitter = random.randint(0, max(0, self.think_jitter_ms))
+            time.sleep((self.min_think_ms + jitter) / 1000.0)
         move_history = [m.uci() for m in board.move_stack]
         uci = self.patzer.get_move(board, move_history)
         return PlayResult(chess.Move.from_uci(uci), None)

@@ -115,31 +115,56 @@ The foundation. A clean, well-validated data pipeline makes every subsequent exp
 
 ### Phase 3 — Lichess Deployment
 
+The deployment has two layers:
+
+- **Bot runner**: the upstream `lichess-bot` repo (handles Lichess API, game/event streams, time controls, concurrency, etc.)
+- **Engine**: Patzer code in this repo (loads a checkpoint and returns a UCI move)
+
 **Goals:**
 
-- Wrap the model in a move-generation interface
-- Deploy inference on Modal (serverless, pay-per-use)
-- Connect to Lichess via lichess-bot
-- Let the bot play enough games to get a stable ELO rating
+- Run one (or multiple) Lichess bot accounts reliably 24/7
+- Keep engine versions/configs reproducible (`patzer_v1`, `patzer_v2`, `patzer_v3`, …)
+- Make it easy to roll forward/back a model checkpoint without breaking the bot runner
+
+**Recommended architecture (current repo)**
+
+- `bot/lichess_homemade.py`: a `lichess-bot` “homemade engine” that loads Patzer and selects moves locally.
+- `bot/templates/homemade_shim.py`: copied into your external `lichess-bot/homemade.py` by `bot/deploy_bot.py`.
+- `bot/configs/patzer_vN.yml`: per-version `lichess-bot` configs. Keep secrets out of git via env vars or `*.local.yml`.
 
 **Move generation details:**
 
-- At each turn: tokenize game history, run forward pass, get logits over vocabulary
-- Mask all illegal moves (use python-chess to enumerate legal moves)
-- Softmax + sample from legal moves only (temperature is a tunable parameter)
-- Lower temperature = more deterministic; higher = more human-like variance
+- At each turn: parse the position (`python-chess`), run Patzer forward pass, get logits over move vocab
+- Restrict to legal moves and choose per policy (typically greedy at temperature 0)
+- Add a tiny per-move delay (`min_think_ms` + `think_jitter_ms`) to avoid bursty move submits causing API rate limits at high concurrency
 
-**Infrastructure:**
+**Operations: where things live**
 
-- Separate Lichess account flagged as a bot account
-- Modal function loads model weights from persistent volume, returns UCI move given game state
-- lichess-bot handles the Lichess API communication and calls the Modal endpoint
+- **This repo (Patzer)**: model code + checkpoints + bot config templates.
+- **External `lichess-bot` repo** (elsewhere on disk): process runner + API client.
+- **Checkpoints**:
+  - local path convention: `checkpoints/patzer_vN/weights_best.pt` (or `weights_iter_*.pt`)
+  - optional remote mirror in R2 (pull down before deploy)
+
+**Deployment workflow (practical)**
+
+- Create a dedicated **Lichess bot account per engine instance** (e.g. `patzer_v1`, `patzer_v3`)
+- Start each account with its own `LICHESS_BOT_TOKEN` (stored in `.env` or your process manager)
+- Use `bot/deploy_bot.py run vN` to:
+  - copy the shim into the external `lichess-bot` tree
+  - start `lichess-bot.py` with the selected config
+  - ensure `PATZER_ROOT` is set so the homemade engine can import this repo
+
+**Keeping bots stable**
+
+- Run each bot under a process supervisor (tmux, systemd, launchd) and write logs to disk.
+- Pin and update `lichess-bot` deliberately (changes can affect rate-limit handling and matchmaking behavior).
+- Prefer config-only rollouts: changing `engine.homemade_options.patzer_checkpoint` should be enough to swap models.
 
 **Deliverables:**
 
-- `serve/` — Modal inference function
-- `bot/` — lichess-bot config and integration
-- Bot live on Lichess with a stable rating
+- `bot/` — configs, deploy helper, homemade engine
+- One or more bots live on Lichess with stable ratings and reproducible configs
 
 ---
 

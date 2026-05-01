@@ -24,6 +24,8 @@ I want to write one (or many) blog posts about this project. So we should keep a
 - **2026-04-30:** Default Stockfish move time for Elo-limited tournament runs set to **0.05s/move** (quality/speed middle ground).
 - **2026-04-30:** Added `eval/model_tournament.py`: model-vs-model league tournament. Discovers checkpoints from R2, supports interactive or `--select/--indices` selection, safely caches downloads (ETag-aware for `ckpt_best.pt`), runs a 2-stage pruning tournament (baseline filter + per-pair SPRT early stopping), prints a leaderboard, and persists to `eval/model_results.json`.
 
+- **2026-05-01:** Upstream **`lichess-bot`** install (outside this repo): `lib/matchmaking.py` pacing — **don’t burn the 60s minimum** until Lichess returns a real **`challenge id`** (declines/API errors/expired outbound challenges retry quickly); **`immediate_challenge_retry`** persists until one successful outbound challenge POST. Optional YAML (default **`true`**): **`matchmaking.quick_retry_after_failed_challenge`**; set **`false`** for the old conservative spacing. Wired in `lib/config.py` via `set_config_default`.
+
 - **2026-04-30:** Lichess deploy lives in-repo: `bot/configs/patzer_v1.yml` & `patzer_v2.yml`, `bot/lichess_homemade.py` (`PatzerEngine` reads `homemade_options`: checkpoint path, `device`, `temperature`, `conditioning`), `bot/templates/homemade_shim.py` synced to external `lichess-bot/homemade.py`, and `bot/deploy_bot.py run v1|v2` (sets `PATZER_ROOT`, uses `LICHESS_BOT_TOKEN`). `bot/configs/*.local.yml` gitignored for overrides.
 - **2026-04-30:** `eval/model_tournament.py` design choice: each run is **fresh** (no resume bookkeeping), but every match record is stamped with `prefix/temperature/top_k/conditioning/openings` so a separate aggregator combines results across runs sharing a settings bucket. Added `--analyze` (no games, just print combined leaderboard) and `--no-aggregate`. Aggregated Elo uses iterative replay of all games (order-independent), so reruns automatically tighten ratings instead of restarting them.
 - **2026-04-30:** `eval/model_tournament.py` supports **multiple `--prefix` values** (concatenated R2 catalog + global indices), fair `--select N` split across prefixes, `--cross-best` (one `ckpt_best.pt` per prefix), and `settings.prefix` as a sorted `|` join for aggregation; baseline when multiple bests picks highest `iter_num`.
@@ -62,10 +64,24 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **2026-04-30:** R2 **`checkpoints/patzer_v1/`** migrated the same way: **9/9** copies (`ckpt_best.pt` → `weights_best.pt`, `ckpt_005000` … `040000` → `weights_iter_*`; `ckpt.pt` unchanged).
 
+- **2026-05-01:** Added `eval/evaluate.py rr-prefix`: given an R2 prefix (e.g. `checkpoints/patzer_v2`), auto-select `weights_best.pt` + **N evenly spaced** `weights_iter_*.pt`, pull/sync locally, then run a full **round-robin head2head**. This matches the common “which checkpoint actually plays best?” workflow without manual cherry-picking.
+- **2026-05-01:** Added `eval/evaluate.py rr-leaderboard`: selects all Patzer players currently on the Elo leaderboard (configurable `--min-games`, optional `--limit`), resolves checkpoint paths from stored `white_checkpoint`/`black_checkpoint`, pulls/syncs, and runs a **round-robin head2head** across the set.
 - **2026-04-30:** `bot/configs/patzer_v1.yml` & `patzer_v2.yml`: aligned **`challenge`** (briefly included classical) and **`matchmaking`** with the main `lichess-bot/config.yml` (matchmaking on, standard variant, 1‑minute idle timeout, 60/120/180 + 0/1/2 clocks, `opponent_max_rating: 2000`, rated + `coarse` filter). Deploy-specific bits (empty token, `engine.dir: "."`, homemade options) unchanged.
+
+- **2026-05-01:** Eval CLI checkpoint UX: `eval/evaluate.py stockfish` now accepts shorthand checkpoints like **`patzer_v3@180`** (→ `checkpoints/patzer_v3/weights_iter_180000.pt`), **`patzer_v3@best`** (→ `weights_best.pt`), plus `--checkpoint` as an alias for the positional argument.
+- **2026-05-01:** `eval/evaluate.py leaderboard`: hide Stockfish rows in display and add `H2H_Rank` computed from **Patzer-vs-Patzer-only** games (ignores all Stockfish games) while keeping the main rank anchored by Stockfish.
+- **2026-05-01:** `eval/evaluate.py rr-leaderboard`: “top candidates” list and rank selection are now **Patzer-only** (Stockfish games still influence Elo, but Stockfish rows aren’t shown/promoted into selection UX).
 
 - **2026-04-30:** Bot configs: removed **`classical`** from `challenge.time_controls` in `patzer_v1.yml` / `patzer_v2.yml` (accept bullet/blitz/rapid only).
 
 - **2026-04-30:** `pipeline/count_games_txt.py` — fast **estimated** (`--estimate`, default) or **`--exact`** newline scan for total **games (= lines)** across `games_*.txt` `--input` globs; same size-sampling approach as prepare for estimates.
 
 - **2026-04-30:** `pipeline/prepare.py` logs progress on **stderr**: sampled **line-count estimate** (bytes ÷ sampled bytes/line), per-input **file banners** with size, a throttled **progress bar** (% of corpus lines scanned), **games/s**, **ETA** (exact when `--max-games` or boundary pass 2 knows total train+val games from pass 1; otherwise inferred from keep ratio × estimate), optional **ANSI** styling (respects `NO_COLOR` / non‑TTY uses newline logs instead of `\r`).
+
+- **2026-05-01:** Pipeline data flow update: `pipeline/transfer_games_from_chewy.sh` is now a wrapper that pulls **tokenized** `data/prepared/` from Chewy (new `pipeline/transfer_prepared_from_chewy.sh`) into a local **timestamped** `data/prepared_<timestamp>/` folder.
+
+- **2026-05-01:** Added `bot/challenge_siblings.sh`: helper script (Bash 3/macOS compatible) that sources `.env` and forces **rated** bot-vs-bot games on Lichess by issuing direct challenges (mix of bullet + blitz presets) for targeted v3 vs v1 matchups instead of random matchmaking.
+
+- **2026-05-01:** Bot rate-limit mitigation: `bot/lichess_homemade.py` now supports `engine.homemade_options.min_think_ms` (+ optional `think_jitter_ms`) to add a small per-move delay and avoid `/api/bot/game/.../move` bursts that trigger 429s and 60s backoff. Enabled by default for v3 in `bot/configs/patzer_v3.yml`.
+
+- **2026-05-01:** Updated `PLAN.md` Phase 3 (Lichess Deployment) to reflect the current two-layer setup: external `lichess-bot` runner + in-repo Patzer “homemade engine”, plus practical ops notes (tokens, checkpoints, process supervision, and why a tiny think delay helps at high concurrency).

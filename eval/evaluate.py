@@ -26,6 +26,10 @@ available weights_*.pt files are listed from R2 and you pick one interactively:
     # Exact path:
     python eval/evaluate.py stockfish checkpoints/patzer_v2/weights_best.pt --games 50 --device mps
 
+    # Shorthand (iter in thousands, i.e. iter/1000):
+    python eval/evaluate.py stockfish patzer_v3@180 --games 50 --device mps
+    python eval/evaluate.py stockfish --checkpoint patzer_v3@best --games 50 --device mps
+
     # Prefix (interactive selection from R2):
     python eval/evaluate.py stockfish checkpoints/patzer_v2 --games 50 --device mps
 
@@ -87,10 +91,12 @@ Common flags
 import argparse
 import math
 import random
+import re
 import sys
 import time
 from itertools import combinations
 from pathlib import Path
+from collections import Counter, defaultdict
 
 import chess
 
@@ -106,9 +112,31 @@ DEFAULT_STOCKFISH = "/opt/homebrew/bin/stockfish"
 
 def _resolve_checkpoint(arg: str) -> Path:
     """
-    If arg ends in .pt, return it as-is.
-    Otherwise treat as an R2 prefix: list weights_*.pt files and prompt the user to pick one.
+    Resolve a checkpoint argument into a concrete path.
+
+    Supported forms:
+      - Exact path: checkpoints/patzer_v3/weights_best.pt
+      - R2 prefix:  checkpoints/patzer_v3            (interactive pick from R2)
+      - Shorthand:  patzer_v3@180                    (→ weights_iter_180000.pt)
+      - Shorthand:  patzer_v3@best                   (→ weights_best.pt)
+      - Shorthand:  patzer_v3                        (→ checkpoints/patzer_v3)
     """
+    raw = arg.strip()
+    if not raw:
+        raise ValueError("Empty checkpoint argument")
+
+    # Shorthand: patzer_vN@K or patzer_vN@best (K is in 'k' steps, i.e. iter/1000).
+    m = re.match(r"^(patzer_v\d+)@(\d+|best)$", raw)
+    if m:
+        ver, tag = m.group(1), m.group(2)
+        if tag == "best":
+            return Path(f"checkpoints/{ver}/weights_best.pt")
+        return Path(f"checkpoints/{ver}/weights_iter_{int(tag) * 1000:06d}.pt")
+
+    # Shorthand: patzer_vN means the checkpoints prefix for that model.
+    if re.match(r"^patzer_v\d+$", raw):
+        raw = f"checkpoints/{raw}"
+
     if arg.endswith(".pt"):
         return Path(arg)
 
@@ -160,6 +188,106 @@ def _sync_checkpoint(path: Path) -> None:
             f"Checkpoint not found locally and R2 pull failed: {path}\n"
             f"Pull manually: python patzer/r2.py pull {r2_key}"
         )
+
+
+_WEIGHTS_ITER_RE = re.compile(r"^weights_iter_(\d+)\.pt$")
+
+
+def _pick_evenly_spaced_iters(
+    available: list[tuple[int, str]],
+    n_pick: int,
+) -> list[str]:
+    """
+    Given sorted (iter_num, key) pairs, pick n_pick snapshots spaced evenly in
+    iteration space (not list index space), always including endpoints when
+    n_pick >= 2. Returns selected keys.
+    """
+    if n_pick <= 0 or not available:
+        return []
+    if n_pick >= len(available):
+        return [k for _, k in available]
+
+    it_min = available[0][0]
+    it_max = available[-1][0]
+    if n_pick == 1 or it_min == it_max:
+        return [available[-1][1]]
+
+    # Targets evenly spaced in iter space, then pick closest available (deduped).
+    remaining = available[:]  # list[(iter, key)], sorted
+    selected: list[str] = []
+    for i in range(n_pick):
+        tgt = it_min + (it_max - it_min) * i / (n_pick - 1)
+        # Find closest remaining iter to tgt.
+        best_j = min(range(len(remaining)), key=lambda j: abs(remaining[j][0] - tgt))
+        _, key = remaining.pop(best_j)
+        selected.append(key)
+
+    # Keep output sorted by iteration for readability.
+    picked_set = set(selected)
+    return [k for _, k in available if k in picked_set]
+
+
+def _select_checkpoints_from_prefix(
+    prefix: str,
+    *,
+    n_iters: int,
+    include_best: bool,
+) -> list[Path]:
+    """
+    Select checkpoints under an R2 prefix:
+      - optionally include weights_best.pt
+      - include n_iters evenly spaced weights_iter_*.pt snapshots
+    """
+    keys = r2.list_weights(prefix)
+    if not keys:
+        sys.exit(f"No weights_*.pt files found in R2 under: {prefix}")
+
+    best_key = None
+    iters: list[tuple[int, str]] = []
+    for k in keys:
+        name = Path(k).name
+        if name == "weights_best.pt":
+            best_key = k
+            continue
+        m = _WEIGHTS_ITER_RE.match(name)
+        if m:
+            iters.append((int(m.group(1)), k))
+
+    iters.sort(key=lambda t: t[0])
+    iter_keys = _pick_evenly_spaced_iters(iters, n_iters)
+
+    selected: list[Path] = []
+    if include_best and best_key is not None:
+        selected.append(Path(best_key))
+    for k in iter_keys:
+        selected.append(Path(k))
+
+    if not selected:
+        sys.exit(f"No selectable checkpoints found under: {prefix}")
+
+    # If weights_best.pt is byte-identical to a weights_iter_*.pt snapshot, don't treat them as
+    # separate players and don't download twice. Prefer weights_best.pt (canonical).
+    try:
+        if best_key is not None:
+            best_path = str(Path(best_key))
+            best_etag = r2.get_etag(best_key)
+            if best_etag is not None:
+                selected = [
+                    p for p in selected
+                    if not (p.name.startswith("weights_iter_") and r2.get_etag(str(p)) == best_etag)
+                ]
+    except Exception:
+        pass
+
+    # Deduplicate paths (e.g. if best is also among iter keys somehow).
+    out: list[Path] = []
+    seen = set()
+    for p in selected:
+        s = str(p)
+        if s not in seen:
+            out.append(p)
+            seen.add(s)
+    return out
 
 OPENING_LINES_UCI = [
     ["e2e4", "e7e5", "g1f3", "b8c6"],  # Italian-ish
@@ -398,6 +526,38 @@ def cmd_head2head(args: argparse.Namespace) -> None:
                              top_k=args.top_k, conditioning=args.conditioning))
     names = [player_name(c, m.iter_num) for c, m in zip(checkpoints, models)]
 
+    # If two checkpoints resolve to the same displayed player name (e.g. weights_best coincides
+    # with a weights_iter snapshot at the same iter), collapse them so we don't record self-play
+    # rows with identical player labels.
+    if len(set(names)) != len(names):
+        kept: dict[str, int] = {}
+        dropped: list[tuple[str, str]] = []  # (name, checkpoint)
+        for i, (n, c) in enumerate(zip(names, checkpoints)):
+            if n not in kept:
+                kept[n] = i
+                continue
+            # Prefer weights_best.pt as canonical when duplicate labels occur.
+            prev_i = kept[n]
+            prev_name = checkpoints[prev_i].name
+            cur_name = c.name
+            prev_is_best = prev_name == "weights_best.pt"
+            cur_is_best = cur_name == "weights_best.pt"
+            if cur_is_best and not prev_is_best:
+                dropped.append((n, str(checkpoints[prev_i])))
+                kept[n] = i
+            else:
+                dropped.append((n, str(c)))
+        if dropped:
+            print("[head2head] warning: collapsing duplicate player labels:", file=sys.stderr)
+            for n, c in dropped[:8]:
+                print(f"  - dropped {n} from {c}", file=sys.stderr)
+            if len(dropped) > 8:
+                print(f"  - (and {len(dropped) - 8} more)", file=sys.stderr)
+        keep_idx = sorted(kept.values())
+        checkpoints = [checkpoints[i] for i in keep_idx]
+        models = [models[i] for i in keep_idx]
+        names = [names[i] for i in keep_idx]
+
     for i, j in pairs:
         a, b = models[i], models[j]
         na, nb = names[i], names[j]
@@ -438,25 +598,258 @@ def cmd_head2head(args: argparse.Namespace) -> None:
         print(f"  → {na}: W-L-D={w}-{l}-{d}  score={score*100:.1f}%")
 
 
+def cmd_rr_prefix(args: argparse.Namespace) -> None:
+    """
+    Common workflow: given an R2 prefix, pull `weights_best.pt` plus N evenly-spaced
+    `weights_iter_*.pt` snapshots, then play a full round-robin head2head.
+    """
+    selected = _select_checkpoints_from_prefix(
+        args.prefix,
+        n_iters=args.iters,
+        include_best=not args.no_best,
+    )
+    for c in selected:
+        _sync_checkpoint(c)
+
+    h2h_args = argparse.Namespace(
+        checkpoints=[str(p) for p in selected],
+        games=args.games,
+        round_robin=True,
+        device=args.device,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        conditioning=args.conditioning,
+        seed=args.seed,
+        db=args.db,
+    )
+    cmd_head2head(h2h_args)
+
+
 def cmd_leaderboard(args: argparse.Namespace) -> None:
     games = query_games()
     if not games:
         print("No games in database.")
         return
 
-    ratings = compute_ratings(games)
-    ratings = [r for r in ratings if r.games >= args.min_games]
+    # Full leaderboard (Stockfish anchored, Patzer fitted). We hide Stockfish rows in display.
+    ratings_all = compute_ratings(games)
+    ratings_all = [r for r in ratings_all if r.games >= args.min_games]
 
-    if not ratings:
+    # H2H-only leaderboard: only include Patzer-vs-Patzer games, no Stockfish anchors.
+    h2h_games = [
+        g for g in games
+        if isinstance(g.get("white"), str)
+        and isinstance(g.get("black"), str)
+        and g["white"].startswith("patzer_v")
+        and g["black"].startswith("patzer_v")
+    ]
+    ratings_h2h = compute_ratings(h2h_games) if h2h_games else []
+    ratings_h2h = [r for r in ratings_h2h if r.games >= args.min_games]
+    h2h_rank_by_name = {r.name: i + 1 for i, r in enumerate(ratings_h2h)}
+
+    # Display: Patzer only.
+    display = [r for r in ratings_all if r.name.startswith("patzer_v")]
+    if not display:
+        print(f"No Patzer players with ≥{args.min_games} games.")
+        return
+
+    print(
+        f"\n{'Rank':<5} {'H2H_Rank':<9} {'Player':<28} {'Elo':>6} {'±':>5} {'Games':>6} {'W-L-D'}"
+    )
+    print("-" * 75)
+    for rank, r in enumerate(display, 1):
+        se = f"{r.stderr:.0f}" if not math.isnan(r.stderr) else "—"
+        wld = f"{r.wins}-{r.losses}-{r.draws}"
+        h2h_rank = h2h_rank_by_name.get(r.name)
+        h2h_disp = f"{h2h_rank}" if h2h_rank is not None else "—"
+        print(f"{rank:<5} {h2h_disp:<9} {r.name:<28} {r.elo:>6.0f} {se:>5} {r.games:>6} {wld}")
+
+
+def _checkpoint_map_from_games(games: list[dict]) -> dict[str, str]:
+    """
+    Map player label -> most common checkpoint path seen in DB for that player.
+    Only considers Patzer players where the corresponding checkpoint field is non-null.
+    """
+    counts: dict[str, Counter[str]] = defaultdict(Counter)
+    for g in games:
+        w, b = g.get("white"), g.get("black")
+        wc, bc = g.get("white_checkpoint"), g.get("black_checkpoint")
+        if isinstance(w, str) and isinstance(wc, str) and w.startswith("patzer_v"):
+            counts[w][wc] += 1
+        if isinstance(b, str) and isinstance(bc, str) and b.startswith("patzer_v"):
+            counts[b][bc] += 1
+
+    out: dict[str, str] = {}
+    for player, c in counts.items():
+        if not c:
+            continue
+        ckpt, _ = c.most_common(1)[0]
+        out[player] = ckpt
+    return out
+
+
+def cmd_rr_leaderboard(args: argparse.Namespace) -> None:
+    """
+    Convenience: take all Patzer players currently on the leaderboard (min-games),
+    resolve their checkpoint paths from the DB, then run a head2head round-robin.
+    """
+    games = query_games()
+    if not games:
+        print("No games in database.")
+        return
+
+    ratings_all = compute_ratings(games)
+    ratings_all = [r for r in ratings_all if r.games >= args.min_games]
+    if not ratings_all:
         print(f"No players with ≥{args.min_games} games.")
         return
 
-    print(f"\n{'Rank':<5} {'Player':<28} {'Elo':>6} {'±':>5} {'Games':>6} {'W-L-D'}")
+    ckpt_map = _checkpoint_map_from_games(games)
+
+    # Display and selection should be Patzer-only (Stockfish games still contribute to Elo,
+    # but we don't show Stockfish rows here).
+    patzers = [r for r in ratings_all if r.name.startswith("patzer_v")]
+    if not patzers:
+        print(f"No Patzer players with ≥{args.min_games} games.")
+        return
+
+    top = patzers[: min(20, len(patzers))]
+    print("\nTop 20 Patzer leaderboard candidates:")
+    print(f"{'Rank':<5} {'Player':<28} {'Elo':>6} {'±':>5} {'Games':>6} {'W-L-D'}")
     print("-" * 65)
-    for rank, r in enumerate(ratings, 1):
+    for rank, r in enumerate(top, 1):
         se = f"{r.stderr:.0f}" if not math.isnan(r.stderr) else "—"
         wld = f"{r.wins}-{r.losses}-{r.draws}"
         print(f"{rank:<5} {r.name:<28} {r.elo:>6.0f} {se:>5} {r.games:>6} {wld}")
+
+    if args.no_prompt:
+        players = [r.name for r in top]
+    else:
+        print("\nSelect models (by Rank) to run a round-robin head2head now.")
+        print("Examples: '1 2 3', '1-5', '1,3,7-10'. Press Enter for default (top 10).")
+
+        def _parse_rank_list(raw: str, n_max: int) -> list[int]:
+            raw = raw.strip()
+            if not raw:
+                return []
+            raw = raw.replace(",", " ")
+            toks = [t for t in raw.split() if t]
+            out: list[int] = []
+            for t in toks:
+                if "-" in t:
+                    a, b = t.split("-", 1)
+                    try:
+                        lo = int(a); hi = int(b)
+                    except ValueError:
+                        continue
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    for x in range(lo, hi + 1):
+                        if 1 <= x <= n_max:
+                            out.append(x)
+                else:
+                    try:
+                        x = int(t)
+                    except ValueError:
+                        continue
+                    if 1 <= x <= n_max:
+                        out.append(x)
+            # Deduplicate while preserving order
+            seen = set()
+            dedup: list[int] = []
+            for x in out:
+                if x not in seen:
+                    dedup.append(x)
+                    seen.add(x)
+            return dedup
+
+        try:
+            raw = input("Ranks to include (default: 1-10): ")
+        except EOFError:
+            return
+        ranks = _parse_rank_list(raw, len(top))
+        if not ranks:
+            ranks = list(range(1, min(10, len(top)) + 1))
+
+        players = [top[i - 1].name for i in ranks]
+        if len(players) < 2:
+            print("[rr-leaderboard] need at least 2 Patzer models selected; skipping.")
+            return
+
+    if args.limit is not None:
+        players = players[: max(0, int(args.limit))]
+
+    checkpoints: list[Path] = []
+    missing: list[str] = []
+    for p in players:
+        ck = ckpt_map.get(p)
+        if not ck:
+            missing.append(p)
+            continue
+        checkpoints.append(Path(ck))
+
+    # Deduplicate checkpoints while preserving order (in case of label collisions).
+    seen = set()
+    uniq: list[Path] = []
+    for c in checkpoints:
+        s = str(c)
+        if s not in seen:
+            uniq.append(c)
+            seen.add(s)
+    checkpoints = uniq
+
+    # If multiple leaderboard labels point to byte-identical checkpoints (e.g. weights_best == weights_iter),
+    # keep only one to avoid treating the same model as multiple players. Prefer weights_best.pt.
+    try:
+        keys = [str(c) for c in checkpoints]
+        etags = {k: r2.get_etag(k) for k in keys}
+        # Group by ETag
+        groups: dict[str, list[Path]] = defaultdict(list)
+        no_etag: list[Path] = []
+        for c in checkpoints:
+            et = etags.get(str(c))
+            if et is None:
+                no_etag.append(c)
+            else:
+                groups[et].append(c)
+
+        keep: list[Path] = []
+        for et, paths in groups.items():
+            # Prefer weights_best.pt when present
+            best = next((p for p in paths if p.name == "weights_best.pt"), None)
+            keep.append(best if best is not None else paths[0])
+        keep.extend(no_etag)
+
+        # Preserve original order
+        keep_set = {str(p) for p in keep}
+        checkpoints = [c for c in checkpoints if str(c) in keep_set]
+    except Exception:
+        pass
+
+    if missing:
+        print(f"[rr-leaderboard] warning: no checkpoint path for {len(missing)} player(s): {', '.join(missing[:8])}")
+        if len(missing) > 8:
+            print(f"[rr-leaderboard] (and {len(missing) - 8} more)")
+
+    if len(checkpoints) < 2:
+        print("[rr-leaderboard] need at least 2 checkpoints to run.")
+        return
+
+    for c in checkpoints:
+        _sync_checkpoint(c)
+
+    h2h_args = argparse.Namespace(
+        checkpoints=[str(p) for p in checkpoints],
+        games=args.games,
+        round_robin=True,
+        device=args.device,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        conditioning=args.conditioning,
+        seed=args.seed,
+        db=args.db,
+    )
+    cmd_head2head(h2h_args)
 
 
 def cmd_history(args: argparse.Namespace) -> None:
@@ -541,7 +934,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- stockfish ---
     p_sf = sub.add_parser("stockfish", help="Adaptive Bayesian Elo estimation vs Stockfish")
-    p_sf.add_argument("checkpoint", help="Path to .pt checkpoint")
+    p_sf.add_argument("checkpoint", nargs="?", help="Checkpoint path / prefix / shorthand (e.g. patzer_v3@180)")
+    p_sf.add_argument(
+        "--checkpoint",
+        dest="checkpoint_flag",
+        default=None,
+        help="Alias for the positional checkpoint (e.g. --checkpoint patzer_v3@180)",
+    )
     p_sf.add_argument("--games", type=int, default=50, help="Max games to play (default 50)")
     p_sf.add_argument("--stop-sigma", type=float, default=50.0, dest="stop_sigma",
                        help="Stop when posterior sigma ≤ this (default 50)")
@@ -568,6 +967,40 @@ def build_parser() -> argparse.ArgumentParser:
     p_h2h.add_argument("--seed", type=int, default=42)
     p_h2h.add_argument("--db", default=str(DB_PATH), help="Database path")
 
+    # --- rr-prefix ---
+    p_rr = sub.add_parser(
+        "rr-prefix",
+        help="Round-robin: weights_best + N evenly-spaced weights_iter_* under an R2 prefix",
+    )
+    p_rr.add_argument("prefix", help="R2 prefix, e.g. checkpoints/patzer_v2")
+    p_rr.add_argument("--iters", type=int, default=6, help="How many weights_iter_* snapshots to include (default 6)")
+    p_rr.add_argument("--no-best", action="store_true", help="Exclude weights_best.pt (default: include)")
+    p_rr.add_argument("--games", type=int, default=12, help="Games per pair (default 12)")
+    p_rr.add_argument("--device", default="cpu")
+    p_rr.add_argument("--temperature", type=float, default=0.0)
+    p_rr.add_argument("--top-k", type=int, default=None, dest="top_k")
+    p_rr.add_argument("--conditioning", default="match_color", choices=CONDITIONING_OPTIONS)
+    p_rr.add_argument("--seed", type=int, default=42)
+    p_rr.add_argument("--db", default=str(DB_PATH), help="Database path")
+
+    # --- rr-leaderboard ---
+    p_rrlb = sub.add_parser(
+        "rr-leaderboard",
+        help="Round-robin across all Patzer models currently on the leaderboard",
+    )
+    p_rrlb.add_argument("--min-games", type=int, default=5, dest="min_games",
+                        help="Only include players with at least this many games (default 5)")
+    p_rrlb.add_argument("--limit", type=int, default=None,
+                        help="Optional cap: only take top N players by current Elo")
+    p_rrlb.add_argument("--games", type=int, default=12, help="Games per pair (default 12)")
+    p_rrlb.add_argument("--device", default="cpu")
+    p_rrlb.add_argument("--temperature", type=float, default=0.0)
+    p_rrlb.add_argument("--top-k", type=int, default=None, dest="top_k")
+    p_rrlb.add_argument("--conditioning", default="match_color", choices=CONDITIONING_OPTIONS)
+    p_rrlb.add_argument("--seed", type=int, default=42)
+    p_rrlb.add_argument("--db", default=str(DB_PATH), help="Database path")
+    p_rrlb.add_argument("--no-prompt", action="store_true", help="Use the whole displayed top 20 (Patzer only) without prompting")
+
     # --- leaderboard ---
     p_lb = sub.add_parser("leaderboard", help="Unified Elo leaderboard")
     p_lb.add_argument("--min-games", type=int, default=5, dest="min_games")
@@ -591,6 +1024,13 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    # Support --checkpoint as an alias for the positional for stockfish.
+    if getattr(args, "cmd", None) == "stockfish":
+        if getattr(args, "checkpoint", None) is None and getattr(args, "checkpoint_flag", None):
+            args.checkpoint = args.checkpoint_flag
+        if getattr(args, "checkpoint", None) is None:
+            parser.error("stockfish: the following arguments are required: checkpoint")
+
     # Allow --db override to propagate to db module
     if hasattr(args, "db") and args.db != str(DB_PATH):
         import eval.db as db_mod
@@ -599,6 +1039,8 @@ def main() -> None:
     dispatch = {
         "stockfish": cmd_stockfish,
         "head2head": cmd_head2head,
+        "rr-prefix": cmd_rr_prefix,
+        "rr-leaderboard": cmd_rr_leaderboard,
         "leaderboard": cmd_leaderboard,
         "history": cmd_history,
         "progress": cmd_progress,
