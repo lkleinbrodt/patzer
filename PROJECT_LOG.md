@@ -62,4 +62,6 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **2026-04-30:** R2 **`checkpoints/patzer_v1/`** migrated the same way: **9/9** copies (`ckpt_best.pt` → `weights_best.pt`, `ckpt_005000` … `040000` → `weights_iter_*`; `ckpt.pt` unchanged).
 
-- **2026-04-30:** `bot/configs/patzer_v1.yml` & `patzer_v2.yml`: aligned **`matchmaking`** with the main `lichess-bot/config.yml` (matchmaking on, standard variant, 1‑minute idle timeout, 60/120/180 + 0/1/2 clocks, `opponent_max_rating: 2000`, rated + `coarse` filter). **`challenge.time_controls`** stays bullet/blitz/rapid only (no classical). Deploy-specific bits (empty token, `engine.dir: "."`, homemade options) unchanged.
+- **2026-04-30:** `bot/configs/patzer_v1.yml` & `patzer_v2.yml`: aligned **`challenge`** (briefly included classical) and **`matchmaking`** with the main `lichess-bot/config.yml` (matchmaking on, standard variant, 1‑minute idle timeout, 60/120/180 + 0/1/2 clocks, `opponent_max_rating: 2000`, rated + `coarse` filter). Deploy-specific bits (empty token, `engine.dir: "."`, homemade options) unchanged.
+
+- **2026-04-30:** Bot configs: removed **`classical`** from `challenge.time_controls` in `patzer_v1.yml` / `patzer_v2.yml` (accept bullet/blitz/rapid only).
