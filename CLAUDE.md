@@ -112,6 +112,17 @@ python eval/evaluate.py progress patzer_v2
 
 All results are stored in `eval/results.db` (SQLite, gitignored). One row per game — no aggregation. Pull checkpoints first with `python patzer/r2.py pull checkpoints/patzer_vN` before evaluating.
 
+### Lichess bot (deploy)
+Configs and a thin `homemade.py` shim live under `bot/`. The [lichess-bot](https://github.com/lichess-bot-devs/lichess-bot) repo stays elsewhere (e.g. `~/Projects/lichess-bot`); `deploy_bot.py` copies `bot/templates/homemade_shim.py` → `lichess-bot/homemade.py` and runs `lichess-bot.py --config …` with `PATZER_ROOT` set.
+
+```bash
+# From Patzer repo root (use lichess-bot’s venv if Patzer’s venv lacks chess/berserk)
+LICHESS_BOT_TOKEN=... python bot/deploy_bot.py run v1
+LICHESS_BOT_TOKEN=... python bot/deploy_bot.py run v2
+```
+
+See `bot/README.md`. Per-bot secrets: `LICHESS_BOT_TOKEN` env or `bot/configs/*.local.yml` (gitignored).
+
 ## Architecture
 
 ### End-to-end data flow

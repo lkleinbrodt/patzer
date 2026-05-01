@@ -1,6 +1,9 @@
 checkpoints/*
 data/*
 eval/results.db
+
+# Lichess bot local overrides (tokens, machine-specific paths)
+bot/configs/*.local.yml
 .DS_Store
 # Byte-compiled / optimized / DLL files
 __pycache__/
