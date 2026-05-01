@@ -66,4 +66,6 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **2026-04-30:** Bot configs: removed **`classical`** from `challenge.time_controls` in `patzer_v1.yml` / `patzer_v2.yml` (accept bullet/blitz/rapid only).
 
+- **2026-04-30:** `pipeline/count_games_txt.py` — fast **estimated** (`--estimate`, default) or **`--exact`** newline scan for total **games (= lines)** across `games_*.txt` `--input` globs; same size-sampling approach as prepare for estimates.
+
 - **2026-04-30:** `pipeline/prepare.py` logs progress on **stderr**: sampled **line-count estimate** (bytes ÷ sampled bytes/line), per-input **file banners** with size, a throttled **progress bar** (% of corpus lines scanned), **games/s**, **ETA** (exact when `--max-games` or boundary pass 2 knows total train+val games from pass 1; otherwise inferred from keep ratio × estimate), optional **ANSI** styling (respects `NO_COLOR` / non‑TTY uses newline logs instead of `\r`).
