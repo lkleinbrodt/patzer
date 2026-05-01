@@ -3,18 +3,21 @@ Migrate older R2 checkpoint keys to the new naming scheme.
 
 Old (historical):
   ckpt_best.pt
-  ckpt_000123.pt
+  ckpt_<iter>.pt   e.g. ckpt_010000.pt, ckpt_065000.pt (numeric suffix only)
 
 New:
   weights_best.pt
-  weights_iter_000123.pt
+  weights_iter_<iter>.pt   e.g. weights_iter_010000.pt (suffix preserved as-is)
+
+`ckpt.pt` (latest resume blob) is not renamed — only `ckpt_best.pt` and `ckpt_<digits>.pt`.
 
 By default we do not delete old keys; we server-side copy within the bucket.
+Copy is skipped when the destination already exists unless you pass --force.
 If you pass --move, we delete the source key after verifying the destination exists.
 
 Usage:
-  cd patzer
   python -m patzer.migrate_r2_checkpoint_names --prefix checkpoints/patzer_v3
+  python -m patzer.migrate_r2_checkpoint_names --prefix checkpoints/patzer_v2
   python -m patzer.migrate_r2_checkpoint_names --prefix checkpoints/patzer_v2 --force
   python -m patzer.migrate_r2_checkpoint_names --prefix checkpoints/patzer_v3 --move
 """

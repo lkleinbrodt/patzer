@@ -11,14 +11,19 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent / "results.db"
 
 
+def iter_display_k(iter_num: int) -> int:
+    """Training step in thousands (iter / 1000) for all user-facing model labels."""
+    return int(iter_num) // 1000
+
+
 def player_name(checkpoint_path: str | Path, iter_num: int) -> str:
     """
     Derive a short stable player identifier from a checkpoint path + iter.
-    checkpoints/patzer_v2/ckpt_best.pt, 45000 -> "patzer_v2@45000"
+    checkpoints/patzer_v2/weights_best.pt, 45000 -> "patzer_v2@45"
     """
     p = Path(checkpoint_path)
     version = p.parent.name if p.parent.name.startswith("patzer_v") else p.stem
-    return f"{version}@{iter_num}"
+    return f"{version}@{iter_display_k(iter_num)}"
 
 
 def stockfish_name(elo: int) -> str:

@@ -19,16 +19,21 @@ Checkpoint naming convention:
 
 Quick start
 -----------
-Estimate Elo against Stockfish (adaptive — plays until confident or max_games):
+Estimate Elo against Stockfish (adaptive — plays until confident or max_games).
+You can specify an exact checkpoint or just a prefix — if a prefix is given, the
+available weights_*.pt files are listed from R2 and you pick one interactively:
 
-    python eval/evaluate.py stockfish checkpoints/patzer_v2/weights_best.pt \\
-        --games 50 --device mps
+    # Exact path:
+    python eval/evaluate.py stockfish checkpoints/patzer_v2/weights_best.pt --games 50 --device mps
+
+    # Prefix (interactive selection from R2):
+    python eval/evaluate.py stockfish checkpoints/patzer_v2 --games 50 --device mps
 
   Output (one line per game):
     elo=1320 [1/50] Patzer=W → 1-0 (win) | W-L-D=1-0-0 score=100.0% | estElo=  1850±320
     elo=1850 [2/50] Patzer=B → 1/2-1/2 (draw) | W-L-D=1-0-1 score= 75.0% | estElo=  1740±180
     ...
-    [result] patzer_v2@45000: estimated Elo = 1283 ± 42  (50 games)
+    [result] patzer_v2@45: estimated Elo = 1283 ± 42  (50 games)
 
   Stops early if posterior sigma drops below --stop-sigma (default 50 Elo points).
 
@@ -56,9 +61,9 @@ Show unified Elo leaderboard (computed from all stored games via Bradley-Terry):
   Output:
     Rank  Player                          Elo     ±  Games  W-L-D
     ---------------------------------------------------------------
-    1     patzer_v2@150000               1380    31     50  28-17-5
-    2     patzer_v2@45000                1283    42     50  22-21-7
-    3     patzer_v1@40000                1050    67     20   6-13-1
+    1     patzer_v2@150                  1380    31     50  28-17-5
+    2     patzer_v2@45                   1283    42     50  22-21-7
+    3     patzer_v1@40                   1050    67     20   6-13-1
     4     stockfish:1600                 1600     —    ...
 
 Show game-by-game history:
@@ -91,30 +96,69 @@ import chess
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from eval.db import DB_PATH, insert_game, player_name, query_games, stockfish_name
+from eval.db import DB_PATH, insert_game, iter_display_k, player_name, query_games, stockfish_name
 from eval.elo import compute_ratings
 from eval.engine import CONDITIONING_OPTIONS, Patzer, StockfishPlayer
-from patzer.r2 import pull_file
+import patzer.r2 as r2
 
 DEFAULT_STOCKFISH = "/opt/homebrew/bin/stockfish"
 
 
-def _ensure_checkpoint(path: Path) -> None:
-    """Pull from R2 if the checkpoint doesn't exist locally. Exits on failure."""
-    if path.exists():
-        return
+def _resolve_checkpoint(arg: str) -> Path:
+    """
+    If arg ends in .pt, return it as-is.
+    Otherwise treat as an R2 prefix: list weights_*.pt files and prompt the user to pick one.
+    """
+    if arg.endswith(".pt"):
+        return Path(arg)
+
+    print(f"\n[r2] listing checkpoints under '{arg}'...")
+    keys = r2.list_weights(arg)
+    if not keys:
+        client, _ = r2._client()
+        if client is None:
+            sys.exit(
+                f"'{arg}' looks like a prefix but R2 is not configured.\n"
+                "Specify an exact checkpoint path (e.g. checkpoints/patzer_v2/weights_best.pt) "
+                "or set R2 env vars in .env."
+            )
+        sys.exit(f"No weights_*.pt files found in R2 under: {arg}")
+
+    print(f"Found {len(keys)} checkpoint(s):")
+    for i, key in enumerate(keys):
+        print(f"  [{i}] {key}")
+
+    while True:
+        try:
+            raw = input(f"\nSelect checkpoint (0–{len(keys)-1}): ").strip()
+            idx = int(raw)
+            if 0 <= idx < len(keys):
+                return Path(keys[idx])
+        except (ValueError, EOFError):
+            pass
+        print(f"  Enter a number between 0 and {len(keys)-1}.")
+
+
+def _sync_checkpoint(path: Path) -> None:
+    """Ensure the local checkpoint is present and up-to-date with R2."""
     r2_key = str(path)
-    print(f"[r2] {path} not found locally — attempting pull from R2...")
-    ok = pull_file(r2_key, path, skip_existing=False)
+
+    if path.exists():
+        if r2.is_fresh(r2_key, path):
+            print(f"[checkpoint] {path.name} is up to date")
+            return
+        print(f"[checkpoint] {path.name} is stale — pulling from R2...")
+    else:
+        print(f"[checkpoint] {path} not found locally — pulling from R2...")
+
+    ok = r2.pull_file(r2_key, path)
     if not ok:
+        if path.exists():
+            print(f"[checkpoint] R2 pull failed (credentials?), using existing local copy")
+            return
         sys.exit(
             f"Checkpoint not found locally and R2 pull failed: {path}\n"
             f"Pull manually: python patzer/r2.py pull {r2_key}"
-        )
-    if not path.exists():
-        sys.exit(
-            f"R2 pull succeeded but file still missing at {path}.\n"
-            f"Check that the R2 key exists: {r2_key}"
         )
 
 OPENING_LINES_UCI = [
@@ -248,8 +292,8 @@ def _posterior_mean_sigma(xs: list[int], p: list[float]) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 def cmd_stockfish(args: argparse.Namespace) -> None:
-    ckpt = Path(args.checkpoint)
-    _ensure_checkpoint(ckpt)
+    ckpt = _resolve_checkpoint(args.checkpoint)
+    _sync_checkpoint(ckpt)
 
     patzer = Patzer(
         ckpt, device=args.device, temperature=args.temperature,
@@ -337,9 +381,9 @@ def cmd_stockfish(args: argparse.Namespace) -> None:
 
 
 def cmd_head2head(args: argparse.Namespace) -> None:
-    checkpoints = [Path(c) for c in args.checkpoints]
+    checkpoints = [_resolve_checkpoint(c) for c in args.checkpoints]
     for c in checkpoints:
-        _ensure_checkpoint(c)
+        _sync_checkpoint(c)
 
     if len(checkpoints) > 2 and not args.round_robin:
         sys.exit("Pass --round-robin to compare more than 2 checkpoints.")
@@ -473,8 +517,9 @@ def cmd_progress(args: argparse.Namespace) -> None:
             elos.append(float("nan"))
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(iters, elos, marker="o", linewidth=2)
-    ax.set_xlabel("Training iteration")
+    xs = [iter_display_k(it) for it in iters]
+    ax.plot(xs, elos, marker="o", linewidth=2)
+    ax.set_xlabel("Training step (iter / 1000)")
     ax.set_ylabel("Estimated Elo")
     ax.set_title(f"Elo progression — {version}")
     ax.grid(True, alpha=0.3)

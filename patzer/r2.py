@@ -55,8 +55,65 @@ def push_file(local_path: str | Path, r2_key: str | None = None) -> bool:
     return True
 
 
+def _sidecar(local_path: Path) -> Path:
+    return local_path.with_suffix(local_path.suffix + ".r2meta")
+
+
+def _read_sidecar(local_path: Path) -> str | None:
+    s = _sidecar(local_path)
+    return s.read_text().strip() if s.exists() else None
+
+
+def _write_sidecar(local_path: Path, etag: str) -> None:
+    _sidecar(local_path).write_text(etag)
+
+
+def get_etag(r2_key: str) -> str | None:
+    """Return the ETag for an R2 object, or None if not found / R2 not configured."""
+    client, bucket = _client()
+    if client is None:
+        return None
+    try:
+        resp = client.head_object(Bucket=bucket, Key=r2_key)
+        return resp["ETag"].strip('"')
+    except Exception:
+        return None
+
+
+def is_fresh(r2_key: str, local_path: Path) -> bool:
+    """
+    True if the local file matches R2 (via stored ETag sidecar).
+    Falls back to True when R2 is unreachable so we don't block offline runs.
+    """
+    if not local_path.exists():
+        return False
+    local = _read_sidecar(local_path)
+    if local is None:
+        return False  # no sidecar → treat as stale
+    remote = get_etag(r2_key)
+    if remote is None:
+        return True   # R2 unreachable → assume fresh
+    return local == remote
+
+
+def list_weights(r2_prefix: str) -> list[str]:
+    """List all weights_*.pt keys under r2_prefix, sorted by name."""
+    client, bucket = _client()
+    if client is None:
+        return []
+    paginator = client.get_paginator("list_objects_v2")
+    keys = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=r2_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            name = Path(key).name
+            if name.startswith("weights_") and name.endswith(".pt"):
+                keys.append(key)
+    return sorted(keys)
+
+
 def pull_file(r2_key: str, local_path: str | Path | None = None, *, skip_existing: bool = False) -> bool:
-    """Download a single file. local_path defaults to r2_key."""
+    """Download a single file and write an ETag sidecar. local_path defaults to r2_key."""
     client, bucket = _client()
     if client is None:
         return False
@@ -69,6 +126,11 @@ def pull_file(r2_key: str, local_path: str | Path | None = None, *, skip_existin
     local_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"[r2] pulling {r2_key} → {local_path}")
     client.download_file(bucket, r2_key, str(local_path))
+    try:
+        etag = client.head_object(Bucket=bucket, Key=r2_key)["ETag"].strip('"')
+        _write_sidecar(local_path, etag)
+    except Exception:
+        pass
     return True
 
 

@@ -51,3 +51,11 @@ I want to write one (or many) blog posts about this project. So we should keep a
   - `eval/evaluate.py` — single CLI (`stockfish`, `head2head`, `leaderboard`, `history`, `progress` subcommands)
 
   Key design wins: individual game records (re-analyzable), relative checkpoint paths (no `/Users/lando/...` baked in), no SPRT (was almost always "inconclusive" at 8–12 games), no R2 discovery baked into eval, unified leaderboard from all stored games. The adaptive Bayesian Elo estimation loop from `tournament.py` is preserved exactly in the `stockfish` subcommand. Results live in `eval/results.db` (gitignored). Prior JSON records discarded — cheap to re-run.
+
+- **2026-04-30:** `eval/inspect_training_run.py` — fixed perceived “hang”: stopped materializing the full W&B history with `list(scan_history(...))` and stopped `print(f.read())` on the whole CSV (huge stdout). Now streams rows straight to disk, default `page_size=10000`, stderr progress every 50k rows, optional `--echo` for a short preview. CLI: positional `run_id` (path fixed to `lkleinbrodt-capital-group/patzer/runs/<id>`), `-o`, `--page-size`, `--progress-every`. Default CSV path: repo `data/wandb_runs/<run_id>.csv` (creates dir); `-o` still overrides.
+
+- **2026-04-30:** Queried R2 (`r2.list_weights('checkpoints/patzer_v2/')`) after v2 training finished: **14** files (`weights_best.pt` + `weights_iter_*` from 230k–274k). Plan: `r2.py pull checkpoints/patzer_v2` then `eval/evaluate.py head2head … --round-robin` on a spread (best + early/mid/late iters) to see which checkpoint is strongest at chess vs best val loss alone.
+
+- **2026-04-30:** R2 `checkpoints/patzer_v2/` also had legacy **`ckpt_<iter>.pt`** snapshots (10k–230k) plus `ckpt_best.pt` / `ckpt.pt`. Ran `python -m patzer.migrate_r2_checkpoint_names --prefix checkpoints/patzer_v2`: **23** server-side copies to `weights_iter_*.pt`, **2** skips (`weights_best.pt`, `weights_iter_230000.pt` already present). Docstring in `migrate_r2_checkpoint_names.py` updated for `ckpt_<iter>.pt`, skip-without-`--force` behavior, and that `ckpt.pt` is left alone.
+
+- **2026-04-30:** R2 **`checkpoints/patzer_v1/`** migrated the same way: **9/9** copies (`ckpt_best.pt` → `weights_best.pt`, `ckpt_005000` … `040000` → `weights_iter_*`; `ckpt.pt` unchanged).

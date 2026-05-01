@@ -17,6 +17,8 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from eval.db import player_name
+
 from patzer.model import GPT, GPTConfig
 from patzer.tokenizer import ChessTokenizer
 
@@ -74,14 +76,14 @@ class Patzer:
         model.to(self.device)
         iter_num = checkpoint.get("iter_num", 0)
         print(
-            f"[patzer] loaded {path.name}  (iter {iter_num}, conditioning={self.conditioning})",
+            f"[patzer] loaded {path.name}  ({player_name(path, iter_num)}, conditioning={self.conditioning})",
             file=sys.stderr,
         )
         return model, iter_num
 
     @property
     def name(self) -> str:
-        return f"Patzer"
+        return player_name(self.checkpoint_path, self.iter_num)
 
     def _result_token_id(self, board: chess.Board) -> int | None:
         tok = self.tokenizer
