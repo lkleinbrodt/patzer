@@ -46,7 +46,7 @@ engine:
       enabled: false
       paths: []
   homemade_options:
-    patzer_checkpoint: "checkpoints/patzer_v2/weights_best.pt"
+    patzer_checkpoint: "checkpoints/patzer_v/weights_best.pt"
     device: "auto"
     temperature: 0
     conditioning: "match_color"

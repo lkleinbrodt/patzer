@@ -83,11 +83,15 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
-# learning rate decay settings
+# learning rate schedule
 decay_lr = True # whether to decay the learning rate
+lr_schedule = 'cosine' # 'cosine' or 'wsd' (warmup-stable-decay)
 warmup_iters = 2000 # how many steps to warm up for
-lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
+lr_decay_iters = 600000 # cosine: should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+# WSD schedule settings (only used when lr_schedule = 'wsd')
+cooldown_start_iter = None # None = no cooldown (constant LR after warmup); set to iter to begin decay
+cooldown_iters = 30000 # length of linear ramp-down from learning_rate to min_lr
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
@@ -95,7 +99,7 @@ device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
-config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str, type(None)))]
 exec(open(Path(__file__).parent / 'configurator.py').read())
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 
@@ -271,19 +275,25 @@ def estimate_loss():
     model.train()
     return out
 
-# learning rate decay scheduler (cosine with warmup)
+# learning rate decay scheduler
 def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
+    # linear warmup (shared by both schedules)
     if it < warmup_iters:
         return learning_rate * (it + 1) / (warmup_iters + 1)
-    # 2) if it > lr_decay_iters, return min learning rate
-    if it > lr_decay_iters:
-        return min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-    return min_lr + coeff * (learning_rate - min_lr)
+    if lr_schedule == 'wsd':
+        # WSD: warmup → stable (constant LR) → linear cooldown
+        if cooldown_start_iter is not None and it >= cooldown_start_iter:
+            progress = min((it - cooldown_start_iter) / cooldown_iters, 1.0)
+            return learning_rate + progress * (min_lr - learning_rate)
+        return learning_rate
+    else:
+        # cosine decay (original nanoGPT schedule)
+        if it > lr_decay_iters:
+            return min_lr
+        decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (learning_rate - min_lr)
 
 # logging
 if wandb_log and master_process:
