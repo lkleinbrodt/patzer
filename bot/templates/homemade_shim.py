@@ -19,4 +19,6 @@ if _patzer not in sys.path:
 
 from bot.lichess_homemade import PatzerEngine
 
-__all__ = ["PatzerEngine"]
+ExampleEngine = PatzerEngine  # lichess-bot's test_bot/homemade.py expects this name
+
+__all__ = ["PatzerEngine", "ExampleEngine"]

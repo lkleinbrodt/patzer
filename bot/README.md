@@ -23,7 +23,7 @@ PATZER_V2_TOKEN=lip_yyy
 LICHESS_BOT_HOME=/path/to/lichess-bot
 ```
 
-Get tokens from https://lichess.org/account/oauth/token — the account must already be upgraded to a bot account.
+Get tokens from [https://lichess.org/account/oauth/token](https://lichess.org/account/oauth/token) — the account must already be upgraded to a bot account.
 
 ## Deploy a bot
 
@@ -53,11 +53,13 @@ python bot/deploy_bot.py run v3
 
 `engine.homemade_options` in each YAML:
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `patzer_checkpoint` | — (required) | path relative to Patzer repo root, e.g. `checkpoints/patzer_v2/weights_best.pt` |
-| `device` | `auto` | `auto`, `cuda`, `mps`, or `cpu` |
-| `temperature` | `0` | 0 = greedy argmax over legal moves |
-| `conditioning` | `match_color` | passed to `eval.engine.Patzer` |
+
+| Key                 | Default       | Description                                                                     |
+| ------------------- | ------------- | ------------------------------------------------------------------------------- |
+| `patzer_checkpoint` | — (required)  | path relative to Patzer repo root, e.g. `checkpoints/patzer_v2/weights_best.pt` |
+| `device`            | `auto`        | `auto`, `cuda`, `mps`, or `cpu`                                                 |
+| `temperature`       | `0`           | 0 = greedy argmax over legal moves                                              |
+| `conditioning`      | `match_color` | passed to `eval.engine.Patzer`                                                  |
+
 
 Token lookup order (first non-empty wins): `LICHESS_BOT_TOKEN` shell var → `PATZER_V<N>_TOKEN` in `.env` → `token:` in the YAML.

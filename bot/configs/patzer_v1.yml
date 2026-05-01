@@ -82,18 +82,22 @@ correspondence:
   ponder: false
 
 matchmaking:
-  allow_matchmaking: false
-  allow_during_games: false
-  challenge_variant: "random"
-  challenge_timeout: 30
+  allow_matchmaking: true
+  allow_during_games: true
+  challenge_variant: "standard"
+  challenge_timeout: 1
   challenge_initial_time:
     - 60
+    - 120
+    - 180
   challenge_increment:
+    - 0
     - 1
-  opponent_rating_difference: 300
+    - 2
+  opponent_max_rating: 2000
   rating_preference: "none"
-  challenge_mode: "random"
-  challenge_filter: none
+  challenge_mode: "rated"
+  challenge_filter: coarse
   include_challenge_block_list: false
 
 greeting:
