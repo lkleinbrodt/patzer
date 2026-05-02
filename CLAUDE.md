@@ -94,7 +94,10 @@ python dataset.py data/prepared/train.bin
 
 ```bash
 cd patzer
-python sample.py --out_dir=checkpoints/patzer_v0
+# Chess-aware: ChessTokenizer, legal-move masking, same conditioning modes as eval (`match_color`, etc.).
+# Default `out_dir` is relative to cwd (`patzer/`). If checkpoints are at repo root, use e.g. `--out_dir=../checkpoints/patzer_v3`.
+python sample.py --out_dir=../checkpoints/patzer_v3 --num_samples=3 --max_new_tokens=80
+python sample.py --out_dir=../checkpoints/patzer_v3 --start='e2e4 e7e5 g1f3' --conditioning=match_color
 ```
 
 ### Evaluate
