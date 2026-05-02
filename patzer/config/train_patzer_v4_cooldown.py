@@ -21,7 +21,7 @@ always_save_checkpoint = True
 early_stop_patience_evals = 0        # disabled: let cooldown run to completion
 early_stop_min_iters = 0
 ckpt_save_interval = 10000           # save ckpt.pt every 10k iters during cooldown
-weights_snapshot_interval = 0        # no per-iter snapshots needed
+weights_snapshot_interval = 5000     # snapshot every 5k iters during cooldown (val drops steadily)
 ckpt_best_min_delta = 0.0001         # lower threshold during cooldown (smaller gains expected)
 ckpt_best_cooldown_steps = 2000
 

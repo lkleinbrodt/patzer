@@ -24,3 +24,4 @@ Should we adjust our approach? should we change our learning schedule? go back t
 
 Introspect on this for a bit, taking into account model architecture, previous training run learnings (from models.md and project_log.md), and the fact that we saw immense gains with the smaller learning rate.
 
+(note a similar blip happened at 160k-161k iterations where i had to restart training again).
