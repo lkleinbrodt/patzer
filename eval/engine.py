@@ -32,6 +32,42 @@ from patzer.tokenizer import ChessTokenizer
 CONDITIONING_OPTIONS = ("match_color", "white_win", "black_win", "draw", "none")
 
 
+def _apply_legal_move_mask(logits: torch.Tensor, legal_ids: set[int]) -> torch.Tensor:
+    """Restrict logits to legal token ids; all other positions are -inf (1-D logits)."""
+    mask = torch.full_like(logits, float("-inf"))
+    if not legal_ids:
+        return mask
+    idx = torch.tensor(tuple(legal_ids), device=logits.device, dtype=torch.long)
+    mask[idx] = logits[idx]
+    return mask
+
+
+class _MoveTokenCache:
+    """Incremental encode of move_history UCI strings into tokenizer ids (play is append-only)."""
+
+    __slots__ = ("_tokenizer", "_hist_tuple", "_ids")
+
+    def __init__(self, tokenizer: ChessTokenizer):
+        self._tokenizer = tokenizer
+        self._hist_tuple: tuple[str, ...] = ()
+        self._ids: list[int] = []
+
+    def cropped_move_token_ids(self, move_history: list[str], max_move_tokens: int) -> list[int]:
+        """Full encode on first use or after history forks; else extend by one move when possible."""
+        h = tuple(move_history)
+        if h == self._hist_tuple:
+            pass
+        elif len(h) == len(self._hist_tuple) + 1 and self._hist_tuple == h[:-1]:
+            self._ids.append(self._tokenizer.encode(h[-1]))
+            self._hist_tuple = h
+        else:
+            self._ids = [self._tokenizer.encode(m) for m in move_history]
+            self._hist_tuple = h
+        if len(self._ids) > max_move_tokens:
+            return self._ids[-max_move_tokens:]
+        return list(self._ids)
+
+
 class Patzer:
     def __init__(
         self,
@@ -49,6 +85,7 @@ class Patzer:
         self.top_k = top_k
         self.conditioning = conditioning
         self.tokenizer = ChessTokenizer()
+        self._move_tok_cache = _MoveTokenCache(self.tokenizer)
         self.model, self.iter_num = self._load_model(Path(checkpoint_path))
         self.checkpoint_path = Path(checkpoint_path)
         self.illegal_move_count = 0
@@ -109,17 +146,10 @@ class Patzer:
         prefix = [self.tokenizer.game_start_id]
         if result_id is not None:
             prefix.append(result_id)
-        move_tokens = [self.tokenizer.encode(m) for m in move_history]
-
-        # Crop to model block size, always keeping the prefix tokens intact.
-        # Naive tail-crop (token_ids[-block_size:]) would silently strip
-        # <GAME_START> and the result token on long games, causing a hard
-        # distribution mismatch vs training. Instead keep the prefix and drop
-        # the oldest move tokens from the front of the move tail.
+        # Crop move tail to block_size while keeping GAME_START (+ optional result).
         block_size = self.model.config.block_size
         max_move_tokens = block_size - len(prefix)
-        if len(move_tokens) > max_move_tokens:
-            move_tokens = move_tokens[-max_move_tokens:]
+        move_tokens = self._move_tok_cache.cropped_move_token_ids(move_history, max_move_tokens)
         token_ids = prefix + move_tokens
 
         x = torch.tensor([token_ids], dtype=torch.long, device=self.device)
@@ -129,12 +159,8 @@ class Patzer:
                 logits, _ = self.model(x)
         logits = logits[0, -1, :]  # (vocab_size,)
 
-        # Legal move masking — zero out everything not in the legal set
         legal_ids = {self.tokenizer.token_to_id[m] for m in legal_moves}
-        mask = torch.full_like(logits, float("-inf"))
-        for tid in legal_ids:
-            mask[tid] = logits[tid]
-        logits = mask
+        logits = _apply_legal_move_mask(logits, legal_ids)
 
         if self.top_k is not None:
             v, _ = torch.topk(logits, min(self.top_k, len(legal_ids)))

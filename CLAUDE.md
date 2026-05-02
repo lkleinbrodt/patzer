@@ -123,6 +123,9 @@ python eval/evaluate.py history patzer_v2
 
 # Plot Elo progression over training steps (requires prior stockfish runs)
 python eval/evaluate.py progress patzer_v2
+
+# Engine regression: legal-mask + move-token cache vs reference (stub model; no weights)
+python -m unittest eval/test_patzer_engine.py -v
 ```
 
 All results are stored in `eval/results.db` (SQLite, gitignored). One row per game — no aggregation. Pull checkpoints first with `python patzer/r2.py pull checkpoints/patzer_vN` before evaluating.

@@ -15,6 +15,7 @@ This file tracks **what we fixed** and a **short backlog**. Detailed write-ups w
 - **`patzer/train.py` (was §1.5–1.7, §2.13 warmup):** `torch.amp.GradScaler('cuda', …)` (enabled only on CUDA fp16); cosine LR uses safe denominator + clamped ratio; resume / `weights_best` peek use shared `load_checkpoint`; eval-loop metrics use module-level `json`/`time`.
 - **`patzer/checkpoint_util.py` + consumers:** Prefer `torch.load(..., weights_only=True)` with `GPTConfig` allow-listed; fall back for legacy pickles. Used by `train.py`, `sample.py`, `eval/engine.py`.
 - **`patzer/r2.py` (was §1.9–1.10, parts of §2.5):** Thread-safe cached boto3 client with adaptive retries; `pull_file` / `pull_dir` skip only when `is_fresh` (ETag sidecar); pushes write `.r2meta` after upload.
+- **`eval/engine.py` (was §1.8, §2.12):** Vectorized legal-move mask (`_apply_legal_move_mask`); incremental UCI token cache (`_MoveTokenCache`) for append-only play; regression tests `eval/test_patzer_engine.py` (unittest, stub model — no checkpoint required).
 
 ---
 
@@ -22,7 +23,7 @@ This file tracks **what we fixed** and a **short backlog**. Detailed write-ups w
 
 | Area | Summary |
 |------|---------|
-| `eval/engine.py` | §1.8 — prefix crop parity with training (if any gap remains); §2.1 — KV-cache (incremental decode); §2.12 — vectorized legal mask |
+| `eval/engine.py` | §2.1 — KV-cache (incremental decode) |
 | `bot/lichess_homemade.py` | §1.11 — configurable `top_k` |
 | `eval/elo.py` | §2.2 — index games by player before BT loop |
 | `eval/evaluate.py` | §2.3 — optional parallel games; §2.9 / §2.14 — progress plot label, quiet sync |
@@ -38,4 +39,4 @@ This file tracks **what we fixed** and a **short backlog**. Detailed write-ups w
 
 ## Summary
 
-Incremental hardening: PyTorch API migration, eval/train/sample parity for checkpoints and context cropping, R2 reliability (freshness + retries + upload sidecars), and engine throughput (KV cache, masking) for play-at-scale.
+Incremental hardening: PyTorch API migration, eval/train/sample parity for checkpoints and context cropping, R2 reliability (freshness + retries + upload sidecars), and engine throughput (vectorized mask, move-token cache, KV-cache pending) for play-at-scale.
