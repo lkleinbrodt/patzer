@@ -249,6 +249,33 @@ if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
+# Track the last iter at which weights_best.pt was written, so the cooldown
+# check (ckpt_best_cooldown_steps) doesn't have to torch.load the whole file.
+# On a fresh run this starts at 0; on resume we peek at the local weights file.
+# R2 upload throttle state.
+# _last_r2_upload_iter  — iter at which we last pushed weights_best.pt to R2.
+# _last_r2_best_val_loss — val_loss of the version currently on R2 (best we've uploaded).
+# Both are used ONLY to rate-limit R2 uploads; they never affect local saving or early stopping.
+#
+# _last_snapshot_iter — iter at which we last created a weights_iter_*.pt snapshot on R2.
+# Tracked in memory because copy_object is server-side and never creates a local file,
+# so a local glob would always return empty and fire a snapshot on every improvement.
+_last_r2_upload_iter: int = 0
+_last_r2_best_val_loss: float = float('inf')
+_last_snapshot_iter: int = 0
+if init_from == 'resume':
+    _best_path = os.path.join(out_dir, 'weights_best.pt')
+    if os.path.exists(_best_path):
+        try:
+            _prev = torch.load(_best_path, map_location='cpu', weights_only=False)
+            _last_r2_upload_iter = int(_prev.get('iter_num', 0))
+            _last_r2_best_val_loss = float(_prev.get('val_loss', float('inf')))
+            # Initialize snapshot counter to resume iter so we wait a full interval
+            # before the next snapshot rather than firing immediately on restart.
+            _last_snapshot_iter = int(_prev.get('iter_num', 0))
+        except Exception:
+            pass
+
 # compile the model
 if compile:
     print("compiling the model... (takes a ~minute)")
@@ -351,17 +378,26 @@ while True:
                 "mfu": round(running_mfu * 100, 2),
                 "ts": _time.time(),
             }) + "\n")
-        r2.push_file(metrics_local, f"{out_dir}/metrics.jsonl")
-        improved = val_loss < (best_val_loss - ckpt_best_min_delta)
+        r2.push_async(metrics_local, f"{out_dir}/metrics.jsonl")
+
+        # improved: any genuine val drop — governs local saving and best_val_loss tracking.
+        # improved_significant: val drop exceeds ckpt_best_min_delta — governs early-stop
+        #   patience reset only. Using a threshold here is intentional: we don't want
+        #   noise-level improvements (e.g. 0.0001 nats) to indefinitely reset patience.
+        improved = val_loss < best_val_loss
+        improved_significant = val_loss < (best_val_loss - ckpt_best_min_delta)
         if early_stop_patience_evals > 0:
-            if improved:
+            if improved_significant:
                 evals_without_improvement = 0
             else:
                 evals_without_improvement += 1
+
         # Save behavior:
-        # - `weights_best.pt` on val improvement (weights-only; for eval/play)
-        # - optional `weights_iter_*.pt` snapshots created by copying `weights_best.pt` (no extra upload)
-        # - `ckpt.pt` ("latest") at most every `ckpt_save_interval` steps (or every eval if interval == 0)
+        # - `weights_best.pt` saved locally on ANY val improvement (true best always on disk)
+        # - R2 upload of `weights_best.pt` is rate-limited by ckpt_best_min_delta and
+        #   ckpt_best_cooldown_steps to reduce egress — these never affect local saving
+        # - optional `weights_iter_*.pt` snapshots created by server-side R2 copy (no upload)
+        # - `ckpt.pt` ("latest") at most every `ckpt_save_interval` steps (or every eval if 0)
         save_latest = False
         if always_save_checkpoint and iter_num > 0:
             save_latest = (ckpt_save_interval == 0) or (iter_num % ckpt_save_interval == 0)
@@ -384,58 +420,37 @@ while True:
                     print(f"saving checkpoint to {out_dir}")
                     ckpt_local = os.path.join(out_dir, 'ckpt.pt')
                     torch.save(checkpoint, ckpt_local)
-                    r2.push_file(ckpt_local)
+                    r2.push_async(ckpt_local)
                 if improved:
-                    # Best val checkpoint is for play/eval; keep it small (weights-only) to reduce R2 egress.
-                    can_save_best = True
-                    if ckpt_best_cooldown_steps and (iter_num % eval_interval == 0):
-                        # cooldown expressed in steps; if non-zero, enforce at most one best save per window
-                        # by checking the last saved iter in the existing file (if present).
-                        best_weights_local = os.path.join(out_dir, 'weights_best.pt')
-                        if os.path.exists(best_weights_local):
-                            try:
-                                prev = torch.load(best_weights_local, map_location='cpu')
-                                prev_it = int(prev.get('iter_num', -10**18))
-                                if (iter_num - prev_it) < ckpt_best_cooldown_steps:
-                                    can_save_best = False
-                            except Exception:
-                                pass
+                    # Always write the true best weights locally.
+                    best_weights_local = os.path.join(out_dir, 'weights_best.pt')
+                    best_weights = {
+                        'model': checkpoint['model'],
+                        'model_args': checkpoint['model_args'],
+                        'iter_num': checkpoint['iter_num'],
+                        'val_loss': checkpoint['val_loss'],
+                        'best_val_loss': checkpoint['best_val_loss'],
+                        'config': checkpoint['config'],
+                    }
+                    torch.save(best_weights, best_weights_local)
 
-                    if can_save_best:
-                        best_weights_local = os.path.join(out_dir, 'weights_best.pt')
-                        best_weights = {
-                            'model': checkpoint['model'],
-                            'model_args': checkpoint['model_args'],
-                            'iter_num': checkpoint['iter_num'],
-                            'val_loss': checkpoint['val_loss'],
-                            'best_val_loss': checkpoint['best_val_loss'],
-                            'config': checkpoint['config'],
-                        }
-                        torch.save(best_weights, best_weights_local)
-                        pushed_best = r2.push_file(best_weights_local)
-
-                        # Optionally create a rate-limited weights snapshot on improvement.
-                        if weights_snapshot_interval and pushed_best:
-                            try:
-                                import re as _re
-                                from pathlib import Path as _Path
-
-                                outp = _Path(out_dir)
-                                last_it = None
-                                for p in outp.glob("weights_iter_*.pt"):
-                                    m = _re.match(r"weights_iter_(\d{6,})\.pt$", p.name)
-                                    if m:
-                                        try:
-                                            it = int(m.group(1))
-                                            last_it = it if (last_it is None or it > last_it) else last_it
-                                        except ValueError:
-                                            pass
-                                if last_it is None or (iter_num - last_it) >= int(weights_snapshot_interval):
-                                    snap_key = f"{out_dir}/weights_iter_{iter_num:06d}.pt"
-                                    # Server-side copy avoids re-uploading.
-                                    r2.copy_object(f"{out_dir}/weights_best.pt", snap_key, overwrite=False)
-                            except Exception:
-                                pass
+                    # R2 upload is rate-limited: only upload when the improvement is
+                    # significant enough AND the cooldown has elapsed.
+                    r2_min_delta_ok = val_loss < (_last_r2_best_val_loss - ckpt_best_min_delta)
+                    r2_cooldown_ok = (iter_num - _last_r2_upload_iter) >= ckpt_best_cooldown_steps
+                    if r2_min_delta_ok and r2_cooldown_ok:
+                        # Compute snapshot key if the interval is due.
+                        # Tracked in memory (_last_snapshot_iter) because copy_object
+                        # is server-side and never creates a local file to glob.
+                        snap_key = None
+                        if weights_snapshot_interval and (iter_num - _last_snapshot_iter) >= int(weights_snapshot_interval):
+                            snap_key = f"{out_dir}/weights_iter_{iter_num:06d}.pt"
+                            _last_snapshot_iter = iter_num
+                        # The copy is chained inside push_async so it runs only after
+                        # the new weights are live on R2.
+                        r2.push_async(best_weights_local, then_copy_to=snap_key)
+                        _last_r2_upload_iter = iter_num
+                        _last_r2_best_val_loss = val_loss
     if ddp and iter_num % eval_interval == 0:
         sync = torch.tensor([evals_without_improvement], dtype=torch.int, device=device)
         broadcast(sync, src=0)
@@ -498,6 +513,15 @@ while True:
                 f"(eval_interval={eval_interval}), at iter {iter_num}"
             )
         break
+
+# Final R2 sync: if the true best weights_best.pt was skipped by the R2 upload
+# throttle (cooldown or min_delta), upload it now before the process exits.
+# This guarantees R2 always ends up with the actual best checkpoint.
+if master_process:
+    _best_local = os.path.join(out_dir, 'weights_best.pt')
+    if os.path.exists(_best_local) and best_val_loss < _last_r2_best_val_loss:
+        print(f"[r2] final sync: uploading best weights (val {best_val_loss:.4f})")
+        r2.push_file(_best_local)  # synchronous — completes before atexit drains async queue
 
 if ddp:
     destroy_process_group()

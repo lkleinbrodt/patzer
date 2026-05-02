@@ -21,7 +21,7 @@
 
 out_dir = 'checkpoints/patzer_v4'
 eval_interval = 1000
-eval_iters = 200
+eval_iters = 50
 log_interval = 100
 
 always_save_checkpoint = True
@@ -29,6 +29,12 @@ early_stop_patience_evals = 25   # ~25k iters of no val improvement
 early_stop_min_iters = 100000    # don't early-stop before 100k iters
 ckpt_save_interval = 20000
 weights_snapshot_interval = 20000
+# Only push weights_best.pt when val improves by at least this amount.
+# Avoids flooding R2 with tiny improvements early in training.
+ckpt_best_min_delta = 0.001
+# At most one weights_best.pt upload per this many steps.
+# With eval_interval=1000, a setting of 5000 means at most ~1 upload / 5 evals.
+ckpt_best_cooldown_steps = 5000
 
 wandb_log = True
 wandb_project = 'patzer'

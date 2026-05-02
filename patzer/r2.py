@@ -17,9 +17,18 @@ Usage:
 pull_dir skips files that already exist locally (use --force to re-download).
 """
 
+import atexit
 import os
+import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# Single-worker executor: uploads queue up and never run concurrently, so
+# there's no risk of two in-flight uploads stomping each other on R2.
+_executor = ThreadPoolExecutor(max_workers=1)
+# Drain all pending uploads on normal exit (including KeyboardInterrupt / Ctrl-C).
+atexit.register(_executor.shutdown, wait=True)
 
 
 def _client():
@@ -53,6 +62,55 @@ def push_file(local_path: str | Path, r2_key: str | None = None) -> bool:
     print(f"[r2] pushing {local_path} → {r2_key}")
     client.upload_file(str(local_path), bucket, r2_key)
     return True
+
+
+def push_async(
+    local_path: str | Path,
+    r2_key: str | None = None,
+    then_copy_to: str | None = None,
+) -> None:
+    """
+    Upload a file in a background thread without blocking the caller.
+
+    Copies local_path to a temporary file first (.uploading sibling), so the
+    caller can safely overwrite or delete local_path while the upload runs.
+    The temp file is deleted automatically when the upload completes.
+
+    If then_copy_to is given, a server-side R2 copy from r2_key → then_copy_to
+    is performed after the upload finishes (no extra data transfer). This is
+    used for creating weights_iter_*.pt snapshots safely: the copy must happen
+    after the new weights are live on R2, not before.
+
+    Uploads are serialised (max_workers=1) so they never pile up or race.
+    All pending uploads are drained automatically on process exit (atexit),
+    including on Ctrl-C / KeyboardInterrupt.
+
+    Falls back to a no-op if R2 is not configured.
+    """
+    client, bucket = _client()
+    if client is None:
+        return
+    local_path = Path(local_path)
+    if r2_key is None:
+        r2_key = str(local_path)
+
+    # Snapshot the file contents now so the caller can't corrupt the upload.
+    tmp = local_path.with_suffix(local_path.suffix + ".uploading")
+    shutil.copy2(local_path, tmp)
+
+    def _do():
+        try:
+            print(f"[r2] pushing {local_path} → {r2_key} (async)")
+            client.upload_file(str(tmp), bucket, r2_key)
+            if then_copy_to:
+                copy_object(r2_key, then_copy_to, overwrite=False)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    _executor.submit(_do)
 
 
 def _sidecar(local_path: Path) -> Path:
