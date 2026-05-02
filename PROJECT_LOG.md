@@ -1,5 +1,7 @@
 I want to write one (or many) blog posts about this project. So we should keep a runningg log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-02:** Replaced stale `patzer/sample.py` (nanoGPT/tiktoken) with a chess-aware sampler: `ChessTokenizer`, legal-move masking, `conditioning` matching eval, optional UCI `start` / `FILE:`, `weights_best.pt` → `ckpt.pt` fallback, vocab_size check. `CODE_REVIEW.md` trimmed to a living backlog; `CLAUDE.md` sample commands updated (`--out_dir=../checkpoints/...` when cwd is `patzer/`).
+
 - **2026-04-29:** After rsync from chewy: **45** `data/lichess_games/games_*.txt` months (**2013-01** … **2016-09**), **11,738,474** games. Lines are already **≥1800 both sides** (scrape floor); stricter cutoffs e.g. **≥2000 → 3.23M**, **≥2200 → 593k**.
 - **2026-04-29:** `pipeline/transfer_games_from_chewy.sh` rsync filter: only `games_*.txt` (no `*.zst` / `.pgn.zst`, no `progress.json` / `scrape.log` / `*.stats.json`).
 - **2026-04-29:** `pipeline/transfer_games_from_chewy.sh` now `cd`s to repo root, creates `data/lichess_games`, and rsync excludes a nested `lichess_games/` directory so transfers cannot recreate `data/lichess_games/lichess_games/`. Removed the redundant nested copy locally.
