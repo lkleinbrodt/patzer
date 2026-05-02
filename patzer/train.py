@@ -295,7 +295,7 @@ if master_process:
         _best_local = os.path.join(out_dir, 'weights_best.pt')
         if os.path.exists(_best_local) and best_val_loss < _last_r2_best_val_loss:
             print(f"[r2] final sync: uploading best weights (val {best_val_loss:.4f})")
-            r2.push_file(_best_local)
+            r2.push_async(_best_local)
     import atexit as _atexit
     _atexit.register(_final_r2_sync)
 
@@ -350,7 +350,6 @@ if wandb_log and master_process:
     import wandb
     wandb_init_kwargs = dict(project=wandb_project, name=wandb_run_name, config=config)
     # If we have a stored run id and we're resuming training, keep logging into that same run.
-    # Using explicit `step=iter_num` on wandb.log keeps the x-axis consistent across restarts.
     if init_from == 'resume' and wandb_run_id:
         wandb_init_kwargs.update(id=wandb_run_id, resume="must")
     run = wandb.init(**wandb_init_kwargs)
@@ -388,7 +387,7 @@ while True:
                 "val/loss": val_loss,
                 "lr": lr,
                 "mfu": running_mfu*100,
-            }, step=iter_num)
+            })
         # append to metrics log and push to R2 so training curve is always visible
         import json as _json, time as _time
         metrics_local = os.path.join(out_dir, 'metrics.jsonl')

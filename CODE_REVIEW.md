@@ -10,7 +10,7 @@ nitpicks (style, formatting, naming preferences) and focus on:
 1. **Bugs** — things that don't do what they say.
 2. **Footguns** — code that works today but will silently break or mislead.
 3. **High-impact improvements** — meaningful wins on correctness, speed, or
-   maintainability.
+  maintainability.
 
 Findings are grouped by severity. Each item links to a file and gives a concrete
 fix where reasonable.
@@ -64,11 +64,11 @@ from model import GPTConfig, GPT
 This file is the unmodified nanoGPT sampler. It:
 
 - Imports `tiktoken` (a GPT‑2 BPE encoder), which Patzer doesn't use and which
-  isn't in `requirements.txt`.
+isn't in `requirements.txt`.
 - Defaults `out_dir = 'out'` (Patzer uses `checkpoints/patzer_vN`).
 - Looks for `meta.pkl` (Patzer writes `meta.json`).
 - Falls back to `enc = tiktoken.get_encoding("gpt2")`, which would tokenize
-  prompt strings as English text and produce gibberish through a chess model.
+prompt strings as English text and produce gibberish through a chess model.
 
 `CLAUDE.md` documents this command (`python sample.py --out_dir=...`) as a
 sanity check, but running it on a real Patzer checkpoint would either crash on
@@ -210,10 +210,10 @@ every existing checkpoint.
 Two failure modes hidden by the assert:
 
 1. If a config sets `lr_decay_iters == warmup_iters` (or less), the divisor is
-   `0` (or negative) — `ZeroDivisionError` or a wildly negative ratio. Crashes
+  `0` (or negative) — `ZeroDivisionError` or a wildly negative ratio. Crashes
    training mid-run.
 2. The `assert 0 <= decay_ratio <= 1` makes the schedule a binary contract:
-   either it succeeds, or it crashes the entire training loop with no useful
+  either it succeeds, or it crashes the entire training loop with no useful
    message. Train.py runs for hours before hitting this.
 
 **Fix:** clamp and guard:
@@ -369,9 +369,9 @@ the shim.
 Two compounding inefficiencies, both relevant for Lichess:
 
 1. **Re-tokenization every move** — the entire `move_history` is re-encoded on
-   each call. O(n²) over a game.
+  each call. O(n²) over a game.
 2. **Full forward pass every move** — no KV cache. The model recomputes
-   attention over the entire prefix each ply, even though only the last token
+  attention over the entire prefix each ply, even though only the last token
    is new.
 
 Per-move cost on CPU/MPS goes from O(1) to O(plies). On CPU at move 100, this
@@ -527,8 +527,7 @@ re-capped at 12, all 12 are completed, "Nothing to do."
 
 The CLI hint suggests `--max-months 24`, but you actually need
 `--max-months 24` *and* nothing-cap-aware extension logic. Right now the only
-way to extend is to delete `progress.json` or pass `--months 2014-01 2014-02
-…` explicitly.
+way to extend is to delete `progress.json` or pass `--months 2014-01 2014-02 …` explicitly.
 
 **Fix:** apply cap *after* filtering to `todo`:
 
@@ -655,8 +654,7 @@ def vast(*args, raw=True):
 
 If `vastai` ever hangs (network outage, API down, broken auth re-prompt),
 `launch.py` hangs forever. `--list` and `--status` calls are interactive
-debug commands and a hang isn't catastrophic, but `vast("show", "instance",
-str(instance_id))` is also called from `run_on_instance` *after* you've
+debug commands and a hang isn't catastrophic, but `vast("show", "instance", str(instance_id))` is also called from `run_on_instance` *after* you've
 already paid for the GPU.
 
 **Fix:** add `timeout=60` (or a sensible default), catch
@@ -745,7 +743,7 @@ finishes:
 - Local `weights_best.pt` exists.
 - No sidecar.
 - Next `evaluate.py` run calls `is_fresh()` → no sidecar → "stale" → re-pulls
-  from R2 (and the freshly pulled file is byte-identical to the local copy).
+from R2 (and the freshly pulled file is byte-identical to the local copy).
 
 Wasted bandwidth and a confusing log line.
 
@@ -840,8 +838,7 @@ all live at the repo root. Consider moving everything except `README.md` and
 ### 3.8 `__pycache__` is checked into the work tree but not gitignored at the right level
 
 `__pycache__/` *is* in `.gitignore`, but the directory shows up in the file
-listing at the repo root. Probably a stale artifact — `git rm -rf --cached
-__pycache__/` once would clean it up.
+listing at the repo root. Probably a stale artifact — `git rm -rf --cached __pycache__/` once would clean it up.
 
 ---
 
@@ -851,31 +848,31 @@ The codebase is in genuinely good shape for a one-person research project of
 this size. Strong points:
 
 - **Configurator + per-version configs** keeps experiments tidy and
-  reproducible.
+reproducible.
 - **R2 sync is well-thought-out** with separation of latest vs best vs
-  snapshot, async upload throttling, and atexit drain.
+snapshot, async upload throttling, and atexit drain.
 - **Eval is unified and reproducible** — single CLI, SQLite source of truth,
-  one row per game. `PROJECT_LOG.md` captures the iteration well.
+one row per game. `PROJECT_LOG.md` captures the iteration well.
 - **Pipeline is resumable and observable** — checksum verification, progress
-  bars, in-memory streaming through `zstdcat | filter | parse`.
+bars, in-memory streaming through `zstdcat | filter | parse`.
 
 The most impactful fixes (in rough ROI order):
 
-1. **Fix or delete `patzer/sample.py`** — it's broken bait.
+1. **Fix or delete `patzer/sample.py*`* — it's broken bait.
 2. **Fix `--no-bots` / `--standard-only` flags** in `filter_games.py`.
 3. **Stop cropping the conditioning prefix** in `eval/engine.py` (1.8).
 4. **Add KV-cache + history caching** to `Patzer.get_move` (2.1) — single
-   biggest engine speedup.
+  biggest engine speedup.
 5. **Future-proof `torch.load`** for `weights_only=True` (1.6) — looming
-   PyTorch breakage.
+  PyTorch breakage.
 6. **Migrate `GradScaler` to the new API** (1.5) — same.
 7. **Fix `parse_pgn.py` log spam** (1.3) — annoyance, but cheap.
 8. **Add upload retries + sidecar on push_async** (2.5, 2.15) — protects
-   against losing best checkpoints.
+  against losing best checkpoints.
 9. **Speed up `elo.py` BT loop** (2.2) — needed before the DB grows much
-   larger.
+  larger.
 10. **Add a small test suite** (3.6) — even 50 lines of pytest would catch
-    most of the bugs above.
+  most of the bugs above.
 
 Nothing here is critical-path-blocking. The model trains, checkpoints sync,
 the bot plays. The recommendations are about hardening, not rescue.

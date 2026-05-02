@@ -48,17 +48,17 @@ Across families, v3’s best sits about **~160 Elo** above v2’s best and **~43
 ### Training
 
 
-| param            | value                              |
-| ---------------- | ---------------------------------- |
-| data             | ~80M tokens, 1800+ ELO, ~1M games  |
-| batch_size       | 128 (32 × 4 accum)                 |
-| max_iters        | 40,000                             |
-| lr               | 1e-3 → 1e-4 (cosine)               |
-| val loss (final) | ~1.84                              |
-| hardware         | Vast.ai (GPU unrecorded)           |
-| step time        | unrecorded                         |
-| throughput       | unrecorded                         |
-| eval time        | unrecorded                         |
+| param            | value                             |
+| ---------------- | --------------------------------- |
+| data             | ~80M tokens, 1800+ ELO, ~1M games |
+| batch_size       | 128 (32 × 4 accum)                |
+| max_iters        | 40,000                            |
+| lr               | 1e-3 → 1e-4 (cosine)              |
+| val loss (final) | ~1.84                             |
+| hardware         | Vast.ai (GPU unrecorded)          |
+| step time        | unrecorded                        |
+| throughput       | unrecorded                        |
+| eval time        | unrecorded                        |
 
 
 **Note:** Val loss was still declining at iter 40k — underfit; LR floor 1e-4. Best val was ~30k, not 40k.
@@ -97,16 +97,16 @@ Across families, v3’s best sits about **~160 Elo** above v2’s best and **~43
 ### Training
 
 
-| param      | value                                                   |
-| ---------- | ------------------------------------------------------- |
-| data       | ~868M train tokens, 1800+ ELO, ~11.15M games            |
-| batch_size | 128 (32 × 4 accum)                                      |
-| max_iters  | 150,000 (was still learning; later resumed toward 250k) |
-| lr         | 1e-3 → 1e-5 (cosine)                                    |
-| hardware   | RTX 3060                                                |
-| step time  | ~155 ms/step                                            |
-| throughput | ~211k tokens/sec                                        |
-| eval time  | ~6,280 ms (200 iters × batch 32 × 2 splits = 12.8k seqs)|
+| param      | value                                                    |
+| ---------- | -------------------------------------------------------- |
+| data       | ~868M train tokens, 1800+ ELO, ~11.15M games             |
+| batch_size | 128 (32 × 4 accum)                                       |
+| max_iters  | 150,000 (was still learning; later resumed toward 250k)  |
+| lr         | 1e-3 → 1e-5 (cosine)                                     |
+| hardware   | RTX 3060                                                 |
+| step time  | ~155 ms/step                                             |
+| throughput | ~211k tokens/sec                                         |
+| eval time  | ~6,280 ms (200 iters × batch 32 × 2 splits = 12.8k seqs) |
 
 
 ### Eval (unified ladder)
@@ -136,18 +136,18 @@ See **Unified eval insights** — peak `**patzer_v2@288`** / `**@274`** (~1475).
 ### Training
 
 
-| param           | value                                                         |
-| --------------- | ------------------------------------------------------------- |
-| data            | ~868M train tokens, 1800+ ELO, ~11.15M games                 |
-| batch_size      | 128 (32 × 4 accum)                                           |
-| max_iters       | 150,000                                                       |
-| lr              | 6e-4 → 1e-5 (cosine)                                         |
-| val loss (best) | **1.514** at iter 145k                                        |
-| gen gap         | +0.025 (first overfitting signal in any run)                  |
-| hardware        | RTX 3060 (phase 1) / RTX 4060 Ti (phase 2)                   |
-| step time       | ~470 ms/step (3060) · ~321 ms/step (4060 Ti)                 |
-| throughput      | ~70k tokens/sec (3060) · ~102k tokens/sec (4060 Ti)          |
-| eval time       | ~32,000 ms (3060) · ~34,000 ms (4060 Ti); includes R2 sync   |
+| param           | value                                                      |
+| --------------- | ---------------------------------------------------------- |
+| data            | ~868M train tokens, 1800+ ELO, ~11.15M games               |
+| batch_size      | 128 (32 × 4 accum)                                         |
+| max_iters       | 150,000                                                    |
+| lr              | 6e-4 → 1e-5 (cosine)                                       |
+| val loss (best) | **1.514** at iter 145k                                     |
+| gen gap         | +0.025 (first overfitting signal in any run)               |
+| hardware        | RTX 3060 (phase 1) / RTX 4060 Ti (phase 2)                 |
+| step time       | ~470 ms/step (3060) · ~321 ms/step (4060 Ti)               |
+| throughput      | ~70k tokens/sec (3060) · ~102k tokens/sec (4060 Ti)        |
+| eval time       | ~32,000 ms (3060) · ~34,000 ms (4060 Ti); includes R2 sync |
 
 
 ### Eval (unified ladder)
@@ -193,20 +193,20 @@ Also introduces the **WSD (Warmup-Stable-Decay)** LR schedule, replacing cosine.
 ### Training
 
 
-| param       | value                                           |
-| ----------- | ----------------------------------------------- |
-| data        | ~2.85B train tokens, 1800+ ELO, ~36.3M games    |
-| batch_size  | 128 (physical, no gradient accumulation)        |
-| lr_schedule | WSD (warmup → stable → linear cooldown)         |
-| lr          | 6e-4 (constant after warmup)                    |
-| cooldown    | 30k iters, linear ramp to 1e-5                  |
-| max_iters   | 600k cap (early stop ends phase 1 sooner)       |
-| compile     | True                                            |
-| hardware    | RTX 4060 Ti (16 GB)                             |
-| step time   | ~318 ms/step (observed at iter 74k–75k)         |
-| throughput  | ~103k tokens/sec                                |
-| eval time   | ~58,000 ms/eval (compute ~40s + R2 sync ~16–20s)|
-| mfu         | ~7–8% (rising; 7.23% at eval, ~8% mid-run)     |
+| param       | value                                            |
+| ----------- | ------------------------------------------------ |
+| data        | ~2.85B train tokens, 1800+ ELO, ~36.3M games     |
+| batch_size  | 128 (physical, no gradient accumulation)         |
+| lr_schedule | WSD (warmup → stable → linear cooldown)          |
+| lr          | 6e-4 (constant after warmup)                     |
+| cooldown    | 30k iters, linear ramp to 1e-5                   |
+| max_iters   | 600k cap (early stop ends phase 1 sooner)        |
+| compile     | True                                             |
+| hardware    | RTX 4060 Ti (16 GB)                              |
+| step time   | ~318 ms/step (observed at iter 74k–75k)          |
+| throughput  | ~103k tokens/sec                                 |
+| eval time   | ~58,000 ms/eval (compute ~40s + R2 sync ~16–20s) |
+| mfu         | ~7–8% (rising; 7.23% at eval, ~8% mid-run)       |
 
 
 **Throughput:** 128 × 256 = 32,768 tokens/iter → ~86,898 iters/epoch.
@@ -234,15 +234,18 @@ Also introduces the **WSD (Warmup-Stable-Decay)** LR schedule, replacing cosine.
 
 ## Hardware & compute reference
 
-| Model | GPU        | Arch  | Params | Effective batch | Step time  | Tokens/sec | Eval time (excl. R2) | eval_iters × batch |
-| ----- | ---------- | ----- | ------ | --------------- | ---------- | ---------- | -------------------- | ------------------ |
-| v1    | unknown    | 6L/6H/384d | ~12M | 128 (32×4)    | —          | —          | —                    | 200 × 32           |
-| v2    | RTX 3060   | 6L/6H/384d | ~12M | 128 (32×4)    | ~155 ms    | ~211k      | ~6 s                 | 200 × 32           |
-| v3    | RTX 3060   | 12L/8H/512d| ~40M | 128 (32×4)    | ~470 ms    | ~70k       | ~32 s                | 200 × 32           |
-| v3    | RTX 4060 Ti| 12L/8H/512d| ~40M | 128 (32×4)    | ~321 ms    | ~102k      | ~34 s                | 200 × 32           |
-| v4    | RTX 4060 Ti| 12L/8H/512d| ~40M | 128 (128×1)   | ~318 ms    | ~103k      | ~40 s (+16s R2)      | 200 × 128          |
+
+| Model | GPU         | Arch        | Params | Effective batch | Step time | Tokens/sec | Eval time (excl. R2) | eval_iters × batch |
+| ----- | ----------- | ----------- | ------ | --------------- | --------- | ---------- | -------------------- | ------------------ |
+| v1    | unknown     | 6L/6H/384d  | ~12M   | 128 (32×4)      | —         | —          | —                    | 200 × 32           |
+| v2    | RTX 3060    | 6L/6H/384d  | ~12M   | 128 (32×4)      | ~155 ms   | ~211k      | ~6 s                 | 200 × 32           |
+| v3    | RTX 3060    | 12L/8H/512d | ~40M   | 128 (32×4)      | ~470 ms   | ~70k       | ~32 s                | 200 × 32           |
+| v3    | RTX 4060 Ti | 12L/8H/512d | ~40M   | 128 (32×4)      | ~321 ms   | ~102k      | ~34 s                | 200 × 32           |
+| v4    | RTX 4060 Ti | 12L/8H/512d | ~40M   | 128 (128×1)     | ~318 ms   | ~103k      | ~40 s (+16s R2)      | 200 × 128          |
+
 
 **Notes:**
+
 - v3→v4 on the same GPU: identical step time confirms accum-drop and explicit compile were already implicit in v3 on CUDA.
 - v4 eval covers 4× more sequences per eval than v2/v3 (51,200 vs 12,800), making each eval ~4× slower with no statistical benefit. Reduce `eval_iters` to 50 in v5.
 - MFU of 7–8% is normal for small models on gaming GPUs (memory-bandwidth-bound, not FLOP-bound).

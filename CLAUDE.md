@@ -9,6 +9,7 @@ Patzer is a transformer-based chess engine trained via next-token prediction on 
 ## Commands
 
 ### Install dependencies
+
 ```bash
 pip install -r requirements.txt
 # Also requires: torch, numpy, wandb (not in requirements.txt yet)
@@ -16,6 +17,7 @@ pip install -r requirements.txt
 ```
 
 ### Data pipeline (run in order)
+
 ```bash
 # 1. Download + filter + parse Lichess monthly dumps (resumable, skips completed months)
 python pipeline/scrape_lichess.py --output-dir ./data/lichess_games --min-elo 1800 --max-months 12
@@ -29,6 +31,7 @@ python ../pipeline/prepare.py --max-games 10000 --output-dir ../data/prepared_te
 ```
 
 ### Train
+
 ```bash
 # Local (MPS on Mac, CPU fallback)
 cd patzer
@@ -45,6 +48,7 @@ python train.py config/train_patzer.py --init_from=resume
 ```
 
 ### Cloud training on Vast.ai
+
 ```bash
 # List available GPU offers
 python launch.py --search-only
@@ -63,6 +67,7 @@ python launch.py --list
 ```
 
 ### Checkpoint sync (Cloudflare R2)
+
 ```bash
 cd patzer
 python r2.py push data/prepared                                      # upload tokenized data
@@ -72,27 +77,34 @@ python r2.py pull checkpoints/patzer_v2/weights_best.pt --force      # re-downlo
 ```
 
 ### Tokenizer sanity check
+
 ```bash
 cd patzer
 python tokenizer.py   # builds vocab, encodes/decodes a sample game, validates round-trip
 ```
 
 ### Dataset sanity check
+
 ```bash
 cd patzer
 python dataset.py data/prepared/train.bin
 ```
 
 ### Sample from a trained model
+
 ```bash
 cd patzer
 python sample.py --out_dir=checkpoints/patzer_v0
 ```
 
 ### Evaluate
+
 ```bash
 # Estimate a model's Elo vs Stockfish (adaptive Bayesian, stops when confident)
 python eval/evaluate.py stockfish checkpoints/patzer_v2/weights_best.pt --games 50 --device mps
+
+# Same, but several checkpoints in one invocation (sequential runs)
+python eval/evaluate.py stockfish patzer_v3@best patzer_v3@180 patzer_v4@40 --games 50 --device mps
 
 # Compare two models head-to-head
 python eval/evaluate.py head2head checkpoints/patzer_v2/weights_best.pt checkpoints/patzer_v1/weights_best.pt --games 20 --device mps
@@ -113,6 +125,7 @@ python eval/evaluate.py progress patzer_v2
 All results are stored in `eval/results.db` (SQLite, gitignored). One row per game — no aggregation. Pull checkpoints first with `python patzer/r2.py pull checkpoints/patzer_vN` before evaluating.
 
 ### Lichess bot (deploy)
+
 Configs and a thin `homemade.py` shim live under `bot/`. The [lichess-bot](https://github.com/lichess-bot-devs/lichess-bot) repo stays elsewhere (e.g. `~/Projects/lichess-bot`); `deploy_bot.py` copies `bot/templates/homemade_shim.py` → `lichess-bot/homemade.py` and runs `lichess-bot.py --config …` with `PATZER_ROOT` set.
 
 ```bash
@@ -126,6 +139,7 @@ See `bot/README.md`. Per-bot secrets: `LICHESS_BOT_TOKEN` env or `bot/configs/*.
 ## Architecture
 
 ### End-to-end data flow
+
 ```
 Lichess .pgn.zst dumps
   → pipeline/scrape_lichess.py   (download + SHA256 verify + filter + parse, per month)
@@ -137,38 +151,48 @@ Lichess .pgn.zst dumps
 ```
 
 ### Configuration system (`patzer/configurator.py`)
+
 `train.py` and `sample.py` use a "poor man's configurator": `exec(open('configurator.py').read())` is called after setting default globals. `configurator.py` reads `sys.argv` and either execs a named config file (e.g. `config/train_patzer.py`) or applies `--key=value` overrides directly into `globals()`. This means config files simply reassign module-level variables, and CLI flags override them. **All scripts must be run from within the `patzer/` directory** because `configurator.py` is loaded by relative path.
 
 ### Tokenizer (`patzer/tokenizer.py`)
+
 Vocabulary is built deterministically from all possible UCI move strings (not from training data) plus 6 special tokens: `<PAD>`, `<GAME_START>`, `<GAME_END>`, `<WHITE_WIN>`, `<BLACK_WIN>`, `<DRAW>`. Vocab size is ~4214. Game encoding format: `<GAME_START> <RESULT> move1 move2 ... <GAME_END>` — the result token is prepended so the model is conditioned on outcome from position 0.
 
 ### Model (`patzer/model.py`)
+
 Standard nanoGPT (Karpathy): `Block = CausalSelfAttention + MLP`, pre-norm with `LayerNorm`, weight-tied token embeddings and LM head. Flash attention used when PyTorch ≥ 2.0. `GPTConfig` holds all architecture hyperparameters. `GPT.configure_optimizers` applies weight decay only to 2D parameters (matmul weights + embeddings), not biases or layernorm.
 
 ### Training loop (`patzer/train.py`)
+
 Direct port of nanoGPT. Data loading uses `np.memmap` (recreated each batch to avoid memory leaks). Supports DDP via `torchrun`. With `always_save_checkpoint=True`, `ckpt.pt` is the **latest** eval (optimizer + iter for resume). `weights_best.pt` is written only when val improves (weights-only for play/eval). Optional `weights_iter_*.pt` snapshots can be created on best improvements. Optional `early_stop_patience_evals` / `early_stop_min_iters` stop when val plateaus. Eval estimates loss over `eval_iters` batches for both train and val splits.
 
 ### LR schedules (`lr_schedule` config key)
+
 Two schedules are supported:
-- **`cosine`** (default, v1–v3): warmup → cosine decay to `min_lr` over `lr_decay_iters` → flat at `min_lr`. Original nanoGPT behavior.
-- **`wsd`** (v4+): Warmup-Stable-Decay. Warmup → constant `learning_rate` → optional linear cooldown to `min_lr`. Decouples training duration from decay schedule.
+
+- `**cosine`** (default, v1–v3): warmup → cosine decay to `min_lr` over `lr_decay_iters` → flat at `min_lr`. Original nanoGPT behavior.
+- `**wsd**` (v4+): Warmup-Stable-Decay. Warmup → constant `learning_rate` → optional linear cooldown to `min_lr`. Decouples training duration from decay schedule.
 
 WSD config knobs: `cooldown_start_iter` (None = no cooldown, constant LR), `cooldown_iters` (length of linear ramp-down), `auto_cooldown` (bool, default False). Two workflows:
+
 - **Manual two-phase**: run phase 1 with `cooldown_start_iter=None` and early stopping; create a second config with `init_from=resume`, `cooldown_start_iter=<phase1_iter_num>`, and `early_stop_patience_evals=0`.
 - **Automatic single-job**: set `auto_cooldown=True`. When early stopping would fire, training instead sets `cooldown_start_iter=iter_num`, extends `max_iters` by `cooldown_iters`, resets patience, and decays LR to `min_lr` before stopping. `cooldown_start_iter` is saved in `ckpt.pt` so mid-cooldown restarts pick up the correct decay curve.
 
 ### R2 storage (`patzer/r2.py`)
+
 Cloudflare R2 (S3-compatible) is used to persist training data and checkpoints. Mirrors local path structure exactly. All functions are silent no-ops when R2 env vars are unset — safe to run locally without credentials. Required env vars: `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ACCOUNT_ID` (set in `.env`).
 
 ### Cloud launch (`launch.py`)
+
 Manages Vast.ai GPU instances via the `vastai` CLI. On new instance creation, builds a bootstrap shell script that: exports R2 env vars, clones the repo, pip-installs, optionally pulls a checkpoint from R2, then runs `train.py` inside a `tmux` session. Training output is tailed at `/workspace/train.log`.
 
 ## Key conventions
 
 - **Run training scripts from `patzer/`**, not the repo root — `configurator.py` and `r2.py` are loaded with relative paths.
 - **Config files** live in `patzer/config/` and are plain Python that reassigns globals. To create a new model version, copy `train_patzer.py` and increment the version.
-- **`device='auto'`** in config files detects cuda → mps → cpu and disables `torch.compile` on non-CUDA devices automatically (see `train.py` lines 83–91).
-- **Data files are gitignored** (`data/*`). All data lives locally or in R2; never commit binary data.
+- `**device='auto'`** in config files detects cuda → mps → cpu and disables `torch.compile` on non-CUDA devices automatically (see `train.py` lines 83–91).
+- **Data files are gitignored** (`data/`*). All data lives locally or in R2; never commit binary data.
 - **Checkpoint naming**: `ckpt.pt` = latest full checkpoint (optimizer + weights, for resume). `weights_best.pt` = best val-loss weights only (use for eval/play). `weights_iter_XXXXXX.pt` = step snapshots. When resuming, only architecture args (`n_layer`, `n_head`, `n_embd`, `block_size`, `bias`, `vocab_size`) are forced to match; other hyperparams can change.
 - **Checkpoint state dict keys**: `model`, `optimizer`, `model_args`, `iter_num`, `best_val_loss`, `evals_without_improvement`, `config`.
 - The `_orig_mod.` prefix stripping in `train.py` and `sample.py` handles state dict keys from `torch.compile`.
+

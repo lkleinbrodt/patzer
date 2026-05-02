@@ -37,6 +37,7 @@ Keep `warmup_iters`, `learning_rate`, `min_lr` as they are.
 **Phase 1 — warmup + constant LR, rely on early stopping.**
 
 Config for v4 phase 1:
+
 ```python
 out_dir = 'checkpoints/patzer_v4_phase1'
 warmup_iters = 3000
@@ -57,6 +58,7 @@ Phase 1 ends when early stopping triggers. Note the iter number at which it stop
 **Phase 2 — cooldown from that checkpoint.**
 
 Config for v4 phase 2:
+
 ```python
 out_dir = 'checkpoints/patzer_v4_final'
 init_from = 'resume'
@@ -85,3 +87,4 @@ The cooldown checkpoint at `STOP_ITER + 30000` is the final v4 model.
 - Run for ~500 iters, log LR every step, confirm LR linearly ramps up to `learning_rate` over `warmup_iters` then stays flat. Should not decay.
 - Resume that short run with phase-2 config, confirm LR linearly decays from `learning_rate` to `min_lr` over `cooldown_iters`.
 - Then kick off the real phase-1 run.
+
