@@ -69,6 +69,25 @@ def push_file(local_path: str | Path, r2_key: str | None = None) -> bool:
     return True
 
 
+def push_file_threadsafe(local_path: str | Path, r2_key: str | None = None) -> bool:
+    """Upload using put_object (single HTTP PUT, no S3Transfer thread pool).
+
+    Safe to call from atexit handlers or any context where the thread pool
+    executor may already be shut down. Streams the file without loading it
+    fully into memory. Limited to 5 GB per object (sufficient for checkpoints).
+    """
+    client, bucket = _client()
+    if client is None:
+        return False
+    local_path = Path(local_path)
+    if r2_key is None:
+        r2_key = str(local_path)
+    print(f"[r2] pushing {local_path} → {r2_key}")
+    with open(local_path, "rb") as f:
+        client.put_object(Bucket=bucket, Key=r2_key, Body=f)
+    return True
+
+
 def push_async(
     local_path: str | Path,
     r2_key: str | None = None,

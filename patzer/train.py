@@ -295,7 +295,7 @@ if master_process:
         _best_local = os.path.join(out_dir, 'weights_best.pt')
         if os.path.exists(_best_local) and best_val_loss < _last_r2_best_val_loss:
             print(f"[r2] final sync: uploading best weights (val {best_val_loss:.4f})")
-            r2.push_async(_best_local)
+            r2.push_file_threadsafe(_best_local)
     import atexit as _atexit
     _atexit.register(_final_r2_sync)
 
