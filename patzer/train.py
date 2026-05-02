@@ -247,6 +247,8 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
+    if 'scaler' in checkpoint:
+        scaler.load_state_dict(checkpoint['scaler'])
 checkpoint = None # free up memory
 
 # Track the last iter at which weights_best.pt was written, so the cooldown
@@ -275,6 +277,19 @@ if init_from == 'resume':
             _last_snapshot_iter = int(_prev.get('iter_num', 0))
         except Exception:
             pass
+
+# Register a final R2 sync via atexit so it runs on any exit: normal, early-stop,
+# KeyboardInterrupt (Ctrl+C), or uncaught exception. If the local weights_best.pt
+# is better than the last R2 upload (e.g. because the upload throttle skipped it),
+# upload it synchronously before the async executor is drained.
+if master_process:
+    def _final_r2_sync():
+        _best_local = os.path.join(out_dir, 'weights_best.pt')
+        if os.path.exists(_best_local) and best_val_loss < _last_r2_best_val_loss:
+            print(f"[r2] final sync: uploading best weights (val {best_val_loss:.4f})")
+            r2.push_file(_best_local)
+    import atexit as _atexit
+    _atexit.register(_final_r2_sync)
 
 # compile the model
 if compile:
@@ -408,6 +423,7 @@ while True:
                 checkpoint = {
                     'model': raw_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
+                    'scaler': scaler.state_dict(),
                     'model_args': model_args,
                     'iter_num': iter_num,
                     'val_loss': val_loss,
@@ -513,15 +529,6 @@ while True:
                 f"(eval_interval={eval_interval}), at iter {iter_num}"
             )
         break
-
-# Final R2 sync: if the true best weights_best.pt was skipped by the R2 upload
-# throttle (cooldown or min_delta), upload it now before the process exits.
-# This guarantees R2 always ends up with the actual best checkpoint.
-if master_process:
-    _best_local = os.path.join(out_dir, 'weights_best.pt')
-    if os.path.exists(_best_local) and best_val_loss < _last_r2_best_val_loss:
-        print(f"[r2] final sync: uploading best weights (val {best_val_loss:.4f})")
-        r2.push_file(_best_local)  # synchronous — completes before atexit drains async queue
 
 if ddp:
     destroy_process_group()

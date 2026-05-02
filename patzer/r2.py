@@ -18,6 +18,7 @@ pull_dir skips files that already exist locally (use --force to re-download).
 """
 
 import atexit
+import itertools
 import os
 import shutil
 import sys
@@ -29,6 +30,10 @@ from pathlib import Path
 _executor = ThreadPoolExecutor(max_workers=1)
 # Drain all pending uploads on normal exit (including KeyboardInterrupt / Ctrl-C).
 atexit.register(_executor.shutdown, wait=True)
+
+# Monotonic counter for unique temp file names — prevents collisions when the
+# same local_path is enqueued again before a prior upload of that path finishes.
+_upload_counter = itertools.count()
 
 
 def _client():
@@ -94,8 +99,10 @@ def push_async(
     if r2_key is None:
         r2_key = str(local_path)
 
-    # Snapshot the file contents now so the caller can't corrupt the upload.
-    tmp = local_path.with_suffix(local_path.suffix + ".uploading")
+    # Use a unique temp name per call so concurrent enqueues of the same file
+    # don't overwrite each other's temp copy mid-upload.
+    n = next(_upload_counter)
+    tmp = local_path.with_name(f"{local_path.stem}.uploading{n}{local_path.suffix}")
     shutil.copy2(local_path, tmp)
 
     def _do():
@@ -104,6 +111,8 @@ def push_async(
             client.upload_file(str(tmp), bucket, r2_key)
             if then_copy_to:
                 copy_object(r2_key, then_copy_to, overwrite=False)
+        except Exception as exc:
+            print(f"[r2] ERROR uploading {local_path} → {r2_key}: {exc}", file=sys.stderr)
         finally:
             try:
                 tmp.unlink(missing_ok=True)
