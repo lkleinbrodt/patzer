@@ -177,15 +177,15 @@ Each experiment produces a new model version with a tracked ELO. The goal is to 
 The question your experiments should answer in order is: data quantity → model size → data quality → training signal quality. That's roughly cheapest-to-most-expensive in terms of iteration cost, and it builds on itself cleanly.
 
 
-| Version | Key change                             | One-liner                                                                                            |
-| ------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-|         |                                        |                                                                                                      |
-| v1      | 12M params, 1M games                   | Baseline                                                                                             |
-| v2      | 40M params, 3M games, longer training. | Current                                                                                              |
-| v3      | 40M params, 15-30M games               | Data scaling — does more data dwarf bigger model?We've pulled all the data from lichess that we can |
-| v4      | 100M+ params, 15-30M games             | Model scaling on top of data                                                                         |
-| v5      | 2200+ ELO filter on same data pipeline | Data quality vs. quantity                                                                            |
-| v6      | ChessBench / Stockfish annotations     | Best-move supervision                                                                                |
+| Version | Key change                             | One-liner                       |
+| ------- | -------------------------------------- | ------------------------------- |
+|         |                                        |                                 |
+| v1      | 12M params, 1M games                   | Baseline, POC                   |
+| v2      | 12M params, 11M games,                 | More data to the baseline model |
+| v3      | 40M params, 11M games                  | Scale the model architecture    |
+| v4      | 40M params, 30M games                  | Scale the data again            |
+| v5      | 2200+ ELO filter on same data pipeline | Data quality vs. quantity       |
+| v6      | ChessBench / Stockfish annotations     | Best-move supervision           |
 
 
 Each version gets a row on the leaderboard. Architecture and training details are recorded for every run.
