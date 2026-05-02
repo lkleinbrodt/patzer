@@ -52,6 +52,10 @@ ckpt_save_interval = 0
 ckpt_best_min_delta = 0.0
 # Optional cooldown: only save best at most once every N steps (0 = no cooldown).
 ckpt_best_cooldown_steps = 0
+# R2: if True (default), large checkpoint / weights uploads use a single background
+# worker so training resumes quickly; ``flush_r2_uploads()`` still drains the queue
+# at exit. Set False to block the loop on every upload (slow, trivial semantics).
+r2_async_uploads = True
 # Create weights snapshots `weights_iter_*.pt` (weights-only) at most every N steps,
 # but only when a new best is saved. 0 disables snapshots.
 weights_snapshot_interval = 10000
@@ -290,11 +294,11 @@ if init_from == 'resume':
             pass
 
 # Register a final R2 sync via atexit so it runs on any exit: normal, early-stop,
-# KeyboardInterrupt (Ctrl+C), or uncaught exception. If the local weights_best.pt
-# is better than the last R2 upload (e.g. because the upload throttle skipped it),
-# upload it synchronously before the async executor is drained.
+# KeyboardInterrupt (Ctrl+C), or uncaught exception. Drain async uploads first,
+# then if the local weights_best.pt is better than the last R2 upload, push it.
 if master_process:
     def _final_r2_sync():
+        r2.flush_r2_uploads(timeout=3600)
         _best_local = os.path.join(out_dir, 'weights_best.pt')
         if os.path.exists(_best_local) and best_val_loss < _last_r2_best_val_loss:
             print(f"[r2] final sync: uploading best weights (val {best_val_loss:.4f})")
@@ -446,7 +450,10 @@ while True:
                     print(f"saving checkpoint to {out_dir}")
                     ckpt_local = os.path.join(out_dir, 'ckpt.pt')
                     torch.save(checkpoint, ckpt_local)
-                    r2.push_async(ckpt_local)
+                    if r2_async_uploads:
+                        r2.push_async(ckpt_local)
+                    else:
+                        r2.push_file(ckpt_local)
                 if improved:
                     # Always write the true best weights locally.
                     best_weights_local = os.path.join(out_dir, 'weights_best.pt')
@@ -472,9 +479,13 @@ while True:
                         if weights_snapshot_interval and (iter_num - _last_snapshot_iter) >= int(weights_snapshot_interval):
                             snap_key = f"{out_dir}/weights_iter_{iter_num:06d}.pt"
                             _last_snapshot_iter = iter_num
-                        # The copy is chained inside push_async so it runs only after
-                        # the new weights are live on R2.
-                        r2.push_async(best_weights_local, then_copy_to=snap_key)
+                        wkey = f"{out_dir}/weights_best.pt"
+                        if r2_async_uploads:
+                            r2.push_async(best_weights_local, r2_key=wkey, then_copy_to=snap_key)
+                        else:
+                            r2.push_file(best_weights_local, wkey)
+                            if snap_key:
+                                r2.copy_object(wkey, snap_key, overwrite=False)
                         _last_r2_upload_iter = iter_num
                         _last_r2_best_val_loss = val_loss
     if ddp and iter_num % eval_interval == 0:
@@ -550,6 +561,12 @@ while True:
                     f"(eval_interval={eval_interval}), at iter {iter_num}"
                 )
             break
+
+if master_process:
+    # Drain async R2 queue before process teardown so checkpoints are not stale on
+    # object storage (mirrors explicit flush for Ctrl+C via atexit, but avoids
+    # only discovering lag after the run ends).
+    r2.flush_r2_uploads(timeout=None)
 
 if ddp:
     destroy_process_group()

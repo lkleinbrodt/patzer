@@ -19,6 +19,16 @@ or when R2 is unreachable (same behavior as is_fresh). Use --force to always
 re-download. Pushes write `.r2meta` sidecars after upload so freshness checks work.
 
 The boto3 client is cached with adaptive retries on the underlying botocore session.
+
+Upload design (training loop):
+  * All uploads use **put_object** (single HTTP request per file). We avoid
+    ``upload_file`` / S3Transfer — it spawns its own thread pool and breaks in
+    atexit / interpreter shutdown ordering.
+  * ``push_async`` uses one background worker so large checkpoint uploads do not
+    block GPU steps for minutes, but ``flush_r2_uploads()`` drains the queue on
+    normal training exit and from atexit so R2 does not lag arbitrarily behind.
+  * If ``ThreadPoolExecutor.submit`` fails (shutdown races), the upload runs
+    synchronously in the caller — never silently dropped.
 """
 
 import atexit
@@ -41,6 +51,11 @@ atexit.register(_executor.shutdown, wait=True)
 # Monotonic counter for unique temp file names — prevents collisions when the
 # same local_path is enqueued again before a prior upload of that path finishes.
 _upload_counter = itertools.count()
+
+# Approximate queue depth (increment when a job is submitted, decrement when it finishes).
+_pending_lock = threading.Lock()
+_pending_async_uploads = 0
+_WARN_QUEUE_DEPTH = 5
 
 _client_lock = threading.Lock()
 _client_cache: tuple[object, str] | None = None
@@ -89,25 +104,6 @@ def push_file(local_path: str | Path, r2_key: str | None = None) -> bool:
     if r2_key is None:
         r2_key = str(local_path)
     print(f"[r2] pushing {local_path} → {r2_key}")
-    client.upload_file(str(local_path), bucket, r2_key)
-    _write_sidecar_from_remote(client, bucket, r2_key, local_path)
-    return True
-
-
-def push_file_threadsafe(local_path: str | Path, r2_key: str | None = None) -> bool:
-    """Upload using put_object (single HTTP PUT, no S3Transfer thread pool).
-
-    Safe to call from atexit handlers or any context where the thread pool
-    executor may already be shut down. Streams the file without loading it
-    fully into memory. Limited to 5 GB per object (sufficient for checkpoints).
-    """
-    client, bucket = _client()
-    if client is None:
-        return False
-    local_path = Path(local_path)
-    if r2_key is None:
-        r2_key = str(local_path)
-    print(f"[r2] pushing {local_path} → {r2_key}")
     with open(local_path, "rb") as f:
         resp = client.put_object(Bucket=bucket, Key=r2_key, Body=f)
     etag = (resp.get("ETag") or "").strip('"')
@@ -116,6 +112,32 @@ def push_file_threadsafe(local_path: str | Path, r2_key: str | None = None) -> b
     else:
         _write_sidecar_from_remote(client, bucket, r2_key, local_path)
     return True
+
+
+def push_file_threadsafe(local_path: str | Path, r2_key: str | None = None) -> bool:
+    """Same as ``push_file`` — kept as an explicit name for atexit / signal handlers.
+
+    Uses ``put_object`` only (no S3Transfer thread pool).
+    """
+    return push_file(local_path, r2_key)
+
+
+def flush_r2_uploads(timeout: float | None = None) -> None:
+    """Block until all queued ``push_async`` uploads finish.
+
+    Submits a no-op on the single-worker executor so every pending upload
+    ahead of it completes first. Call this on normal training shutdown so R2
+    is not arbitrarily far behind the local checkpoint dir.
+    """
+    try:
+        fut = _executor.submit(lambda: None)
+    except RuntimeError as exc:
+        print(f"[r2] flush_r2_uploads: executor closed ({exc})", file=sys.stderr)
+        return
+    try:
+        fut.result(timeout=timeout)
+    except Exception as exc:
+        print(f"[r2] flush_r2_uploads: {exc}", file=sys.stderr)
 
 
 def push_async(
@@ -135,12 +157,16 @@ def push_async(
     used for creating weights_iter_*.pt snapshots safely: the copy must happen
     after the new weights are live on R2, not before.
 
-    Uploads are serialised (max_workers=1) so they never pile up or race.
-    All pending uploads are drained automatically on process exit (atexit),
-    including on Ctrl-C / KeyboardInterrupt.
+    Uses ``put_object`` only (no ``upload_file`` / S3Transfer thread pool).
+
+    Uploads are serialised (max_workers=1). If ``submit`` fails, uploads
+    synchronously in the foreground instead of dropping the work.
+
+    Call ``flush_r2_uploads()`` at training shutdown so R2 catches up.
 
     Falls back to a no-op if R2 is not configured.
     """
+    global _pending_async_uploads
     client, bucket = _client()
     if client is None:
         return
@@ -148,18 +174,15 @@ def push_async(
     if r2_key is None:
         r2_key = str(local_path)
 
-    # Use a unique temp name per call so concurrent enqueues of the same file
-    # don't overwrite each other's temp copy mid-upload.
     n = next(_upload_counter)
     tmp = local_path.with_name(f"{local_path.stem}.uploading{n}{local_path.suffix}")
     shutil.copy2(local_path, tmp)
 
-    def _do():
+    def _work_inner() -> None:
         try:
             print(f"[r2] pushing {local_path} → {r2_key} (async)")
-            client.upload_file(str(tmp), bucket, r2_key)
-            # Intentionally no sidecar write: local_path may have been
-            # overwritten by the caller while upload ran (async contract).
+            with open(tmp, "rb") as f:
+                client.put_object(Bucket=bucket, Key=r2_key, Body=f)
             if then_copy_to:
                 copy_object(r2_key, then_copy_to, overwrite=False)
         except Exception as exc:
@@ -170,7 +193,34 @@ def push_async(
             except Exception:
                 pass
 
-    _executor.submit(_do)
+    with _pending_lock:
+        _pending_async_uploads += 1
+        depth = _pending_async_uploads
+    if depth > _WARN_QUEUE_DEPTH:
+        print(
+            f"[r2] WARNING: {depth} upload(s) queued — R2 may lag behind training "
+            f"(slow network or very frequent saves). Consider longer ckpt_save_interval.",
+            file=sys.stderr,
+        )
+
+    def _job() -> None:
+        global _pending_async_uploads
+        try:
+            _work_inner()
+        finally:
+            with _pending_lock:
+                _pending_async_uploads -= 1
+
+    try:
+        _executor.submit(_job)
+    except RuntimeError as exc:
+        with _pending_lock:
+            _pending_async_uploads -= 1
+        print(
+            f"[r2] async submit failed ({exc}); uploading synchronously in foreground",
+            file=sys.stderr,
+        )
+        _work_inner()
 
 
 def _sidecar(local_path: Path) -> Path:

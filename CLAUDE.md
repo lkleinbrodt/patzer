@@ -188,6 +188,8 @@ WSD config knobs: `cooldown_start_iter` (None = no cooldown, constant LR), `cool
 
 Cloudflare R2 (S3-compatible) is used to persist training data and checkpoints. Mirrors local path structure exactly. All functions are silent no-ops when R2 env vars are unset — safe to run locally without credentials. Required env vars: `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ACCOUNT_ID` (set in `.env`).
 
+Uploads use **`put_object`** (streamed body) instead of boto3 `upload_file` / S3Transfer so there is no hidden nested thread pool during interpreter shutdown. Large files (`ckpt.pt`, `weights_best.pt` rate-limited) default to **`push_async`** (one background worker) so training does not block for multi-minute uploads; **`flush_r2_uploads()`** runs when the training loop ends and again from atexit so the queue drains before process exit. **`metrics.jsonl`** is uploaded synchronously (small file). If `ThreadPoolExecutor.submit` fails, uploads fall back to the foreground. Set **`r2_async_uploads = False`** in config for fully synchronous large uploads (slow, easiest to reason about).
+
 ### Cloud launch (`launch.py`)
 
 Manages Vast.ai GPU instances via the `vastai` CLI. On new instance creation, builds a bootstrap shell script that: exports R2 env vars, clones the repo, pip-installs, optionally pulls a checkpoint from R2, then runs `train.py` inside a `tmux` session. Training output is tailed at `/workspace/train.log`.
