@@ -1,5 +1,7 @@
 I want to write one (or many) blog posts about this project. So we should keep a runningg log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-02:** `pipeline/filter_games.py` — CLI now **`--allow-bots`** and **`--include-variants`** (opt-in); old `--no-bots` / `--standard-only` never worked as documented (`store_true` + `default=True`). `parse_pgn.py` — progress log moved into **`flush_game()`** so it fires once per N **games**, not once per PGN line. `CODE_REVIEW.md` trimmed to living backlog.
+
 - **2026-04-29:** After rsync from chewy: **45** `data/lichess_games/games_*.txt` months (**2013-01** … **2016-09**), **11,738,474** games. Lines are already **≥1800 both sides** (scrape floor); stricter cutoffs e.g. **≥2000 → 3.23M**, **≥2200 → 593k**.
 - **2026-04-29:** `pipeline/transfer_games_from_chewy.sh` rsync filter: only `games_*.txt` (no `*.zst` / `.pgn.zst`, no `progress.json` / `scrape.log` / `*.stats.json`).
 - **2026-04-29:** `pipeline/transfer_games_from_chewy.sh` now `cd`s to repo root, creates `data/lichess_games`, and rsync excludes a nested `lichess_games/` directory so transfers cannot recreate `data/lichess_games/lichess_games/`. Removed the redundant nested copy locally.

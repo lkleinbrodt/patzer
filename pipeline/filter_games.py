@@ -4,6 +4,8 @@ Filter high-ELO games from a Lichess PGN stream.
 Usage:
     zstdcat lichess_db.pgn.zst | python filter_games.py > filtered.pgn
     zstdcat lichess_db.pgn.zst | python filter_games.py --min-elo 2000 --time-controls 600 180 > filtered.pgn
+    # Include bot games and/or chess960 etc.:
+    zstdcat lichess_db.pgn.zst | python filter_games.py --allow-bots --include-variants > filtered.pgn
     zstdcat lichess_db.pgn.zst | python filter_games.py | sed 's/ { \[%[^}]*\] }//g' > filtered.pgn
 
 No decompression needed. Reads stdin, writes stdout.
@@ -22,10 +24,18 @@ def parse_args():
                         default=None,
                         help="Whitelist of base time controls in seconds e.g. 600 180 300. "
                              "If not set, bullet (<180s base) is excluded and everything else passes.")
-    parser.add_argument("--no-bots", action="store_true", default=True,
-                        help="Exclude games where either player is a BOT (default: True)")
-    parser.add_argument("--standard-only", action="store_true", default=True,
-                        help="Exclude variant games (default: True)")
+    parser.add_argument(
+        "--allow-bots",
+        action="store_true",
+        default=False,
+        help="Include games where either player is a BOT (default: exclude bots)",
+    )
+    parser.add_argument(
+        "--include-variants",
+        action="store_true",
+        default=False,
+        help="Include non-Standard variants (default: standard chess only)",
+    )
     parser.add_argument("--log-every", type=int, default=100_000,
                         help="Log progress every N games (default: 100000)")
     return parser.parse_args()
@@ -44,12 +54,12 @@ def parse_time_control(tc_str):
 
 
 def passes_filters(headers, args):
-    # Standard chess only
-    if args.standard_only and headers.get("Variant", "Standard") != "Standard":
+    # Standard chess only unless --include-variants
+    if not args.include_variants and headers.get("Variant", "Standard") != "Standard":
         return False
 
-    # No bots
-    if args.no_bots:
+    # Exclude bots unless --allow-bots
+    if not args.allow_bots:
         if headers.get("WhiteTitle") == "BOT" or headers.get("BlackTitle") == "BOT":
             return False
 
