@@ -119,6 +119,17 @@ def parse_games(pgn_stream, output_file, args):
             return
 
         stats["total_games"] += 1
+        if stats["total_games"] % args.log_every == 0:
+            elapsed = time.time() - start_time
+            rate = stats["total_games"] / elapsed
+            print(
+                f"  {stats['total_games']:,} games processed, "
+                f"{stats['kept_games']:,} kept "
+                f"({100 * stats['kept_games'] / stats['total_games']:.1f}%) "
+                f"| {rate:.0f} games/sec",
+                file=sys.stderr,
+            )
+
         pgn_text = "".join(current_game_lines)
 
         # Extract result and ELO from already-parsed headers
@@ -205,17 +216,6 @@ def parse_games(pgn_stream, output_file, args):
                     current_headers[key] = value
                 except Exception:
                     pass
-
-        if stats["total_games"] % args.log_every == 0 and stats["total_games"] > 0:
-            elapsed = time.time() - start_time
-            rate = stats["total_games"] / elapsed
-            print(
-                f"  {stats['total_games']:,} games processed, "
-                f"{stats['kept_games']:,} kept "
-                f"({100 * stats['kept_games'] / stats['total_games']:.1f}%) "
-                f"| {rate:.0f} games/sec",
-                file=sys.stderr
-            )
 
     # Flush final game
     flush_game()
