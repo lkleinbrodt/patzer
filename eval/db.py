@@ -39,6 +39,7 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 white            TEXT    NOT NULL,
                 black            TEXT    NOT NULL,
                 result           TEXT    NOT NULL,
+                termination      TEXT,
                 white_checkpoint TEXT,
                 black_checkpoint TEXT,
                 white_iter       INTEGER,
@@ -57,6 +58,7 @@ def insert_game(
     white: str,
     black: str,
     result: str,
+    termination: str | None = None,
     white_checkpoint: str | None = None,
     black_checkpoint: str | None = None,
     white_iter: int | None = None,
@@ -73,11 +75,11 @@ def insert_game(
         con.execute(
             """
             INSERT INTO games
-                (timestamp, white, black, result, white_checkpoint, black_checkpoint,
+                (timestamp, white, black, result, termination, white_checkpoint, black_checkpoint,
                  white_iter, black_iter, opening, temperature, top_k, conditioning)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (ts, white, black, result, white_checkpoint, black_checkpoint,
+            (ts, white, black, result, termination, white_checkpoint, black_checkpoint,
              white_iter, black_iter, opening, temperature, top_k, conditioning),
         )
         con.commit()

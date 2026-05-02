@@ -36,7 +36,7 @@ class Patzer:
         self,
         checkpoint_path: str | Path,
         device: str = "cpu",
-        temperature: float = 0.0,
+        temperature: float = 0.01,
         top_k: int | None = None,
         conditioning: str = "match_color",
     ):
@@ -105,15 +105,21 @@ class Patzer:
             raise ValueError("No legal moves available")
 
         result_id = self._result_token_id(board)
-        token_ids = [self.tokenizer.game_start_id]
+        prefix = [self.tokenizer.game_start_id]
         if result_id is not None:
-            token_ids.append(result_id)
-        token_ids += [self.tokenizer.encode(m) for m in move_history]
+            prefix.append(result_id)
+        move_tokens = [self.tokenizer.encode(m) for m in move_history]
 
-        # Crop to model block size
+        # Crop to model block size, always keeping the prefix tokens intact.
+        # Naive tail-crop (token_ids[-block_size:]) would silently strip
+        # <GAME_START> and the result token on long games, causing a hard
+        # distribution mismatch vs training. Instead keep the prefix and drop
+        # the oldest move tokens from the front of the move tail.
         block_size = self.model.config.block_size
-        if len(token_ids) > block_size:
-            token_ids = token_ids[-block_size:]
+        max_move_tokens = block_size - len(prefix)
+        if len(move_tokens) > max_move_tokens:
+            move_tokens = move_tokens[-max_move_tokens:]
+        token_ids = prefix + move_tokens
 
         x = torch.tensor([token_ids], dtype=torch.long, device=self.device)
 

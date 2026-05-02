@@ -153,7 +153,9 @@ Two schedules are supported:
 - **`cosine`** (default, v1–v3): warmup → cosine decay to `min_lr` over `lr_decay_iters` → flat at `min_lr`. Original nanoGPT behavior.
 - **`wsd`** (v4+): Warmup-Stable-Decay. Warmup → constant `learning_rate` → optional linear cooldown to `min_lr`. Decouples training duration from decay schedule.
 
-WSD config knobs: `cooldown_start_iter` (None = no cooldown, constant LR), `cooldown_iters` (length of linear ramp-down). Intended workflow: run phase 1 with `cooldown_start_iter=None` and early stopping, then resume from that checkpoint with `cooldown_start_iter` set to the phase-1 stop iter for a short cooldown phase.
+WSD config knobs: `cooldown_start_iter` (None = no cooldown, constant LR), `cooldown_iters` (length of linear ramp-down), `auto_cooldown` (bool, default False). Two workflows:
+- **Manual two-phase**: run phase 1 with `cooldown_start_iter=None` and early stopping; create a second config with `init_from=resume`, `cooldown_start_iter=<phase1_iter_num>`, and `early_stop_patience_evals=0`.
+- **Automatic single-job**: set `auto_cooldown=True`. When early stopping would fire, training instead sets `cooldown_start_iter=iter_num`, extends `max_iters` by `cooldown_iters`, resets patience, and decays LR to `min_lr` before stopping. `cooldown_start_iter` is saved in `ckpt.pt` so mid-cooldown restarts pick up the correct decay curve.
 
 ### R2 storage (`patzer/r2.py`)
 Cloudflare R2 (S3-compatible) is used to persist training data and checkpoints. Mirrors local path structure exactly. All functions are silent no-ops when R2 env vars are unset — safe to run locally without credentials. Required env vars: `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ACCOUNT_ID` (set in `.env`).

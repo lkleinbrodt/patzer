@@ -81,7 +81,7 @@ Plot Elo vs training step (requires matplotlib, requires prior stockfish runs):
 Common flags
 ------------
   --device        cpu | mps | cuda  (default: cpu)
-  --temperature   move sampling temperature; 0.0 = greedy (default)
+  --temperature   move sampling temperature; 0.0 = greedy, 0.01 = default
   --conditioning  match_color | white_win | black_win | draw | none (default: match_color)
   --games         number of games to play
   --stockfish     path to stockfish binary (default: /opt/homebrew/bin/stockfish)
@@ -289,16 +289,48 @@ def _select_checkpoints_from_prefix(
             seen.add(s)
     return out
 
-OPENING_LINES_UCI = [
-    ["e2e4", "e7e5", "g1f3", "b8c6"],  # Italian-ish
-    ["d2d4", "d7d5", "c2c4", "e7e6"],  # QGD
-    ["e2e4", "c7c5", "g1f3", "d7d6"],  # Sicilian
-    ["d2d4", "g8f6", "c2c4", "g7g6"],  # King's Indian
-    ["c2c4", "e7e5", "b1c3", "g8f6"],  # English
-    ["e2e4", "e7e6", "d2d4", "d7d5"],  # French
-    ["e2e4", "c7c6", "d2d4", "d7d5"],  # Caro-Kann
-    ["d2d4", "d7d5", "g1f3", "g8f6"],  # London-ish
-]
+OPENINGS_JSON_PATH = Path(__file__).parent / "openings.json"
+
+_opening_book_cache: list[list[str]] | None = None
+
+
+def _load_opening_book() -> list[list[str]]:
+    """
+    Load opening sequences from openings.json — a pre-filtered list of balanced
+    UCI move sequences (built by eval/build_opening_book.py from Stockfish's
+    2moves_v2.pgn, filtered to |eval| ≤ 75 cp).
+
+    Each entry is a list of 4 UCI move strings, e.g. ["e2e4","e7e5","g1f3","b8c6"].
+    These are both applied to the board AND pre-filled into move_history so the
+    model receives its proper opening context.
+
+    Falls back to a tiny hardcoded set if the file is missing.
+    """
+    global _opening_book_cache
+    if _opening_book_cache is not None:
+        return _opening_book_cache
+
+    if OPENINGS_JSON_PATH.exists():
+        import json
+        _opening_book_cache = json.loads(OPENINGS_JSON_PATH.read_text())
+        return _opening_book_cache
+
+    print(
+        f"[warn] {OPENINGS_JSON_PATH} not found — using minimal hardcoded fallback.\n"
+        "       Run:  python eval/build_opening_book.py",
+        file=sys.stderr,
+    )
+    _opening_book_cache = [
+        ["e2e4", "e7e5", "g1f3", "b8c6"],
+        ["d2d4", "d7d5", "c2c4", "e7e6"],
+        ["e2e4", "c7c5", "g1f3", "d7d6"],
+        ["d2d4", "g8f6", "c2c4", "g7g6"],
+        ["c2c4", "e7e5", "b1c3", "g8f6"],
+        ["e2e4", "e7e6", "d2d4", "d7d5"],
+        ["e2e4", "c7c6", "d2d4", "d7d5"],
+        ["d2d4", "d7d5", "g1f3", "g8f6"],
+    ]
+    return _opening_book_cache
 
 
 # ---------------------------------------------------------------------------
@@ -308,19 +340,36 @@ OPENING_LINES_UCI = [
 def play_game(
     white,
     black,
-    opening: list[str] | None = None,
+    opening_moves: list[str] | None = None,
     max_moves: int = 300,
-) -> str:
-    """Play one game; returns '1-0', '0-1', or '1/2-1/2'."""
+) -> tuple[str, str]:
+    """
+    Play one game from the starting position (optionally with opening_moves
+    pre-applied). Returns (result, termination).
+
+    result: '1-0' | '0-1' | '1/2-1/2'
+    termination: 'checkmate' | 'stalemate' | 'fifty_moves' | 'threefold_repetition' |
+                 'insufficient_material' | 'seventyfive_moves' | 'fivefold_repetition' |
+                 'move_limit'
+
+    opening_moves are both applied to the board AND pre-filled into move_history
+    so Patzer models receive their proper opening context (the sequence they were
+    trained on) rather than being asked to move from an unfamiliar position with
+    zero context tokens.
+    """
     board = chess.Board()
     move_history: list[str] = []
 
-    if opening:
-        for uci in opening:
-            move = chess.Move.from_uci(uci)
-            if move in board.legal_moves:
-                board.push(move)
+    if opening_moves:
+        for uci in opening_moves:
+            m = chess.Move.from_uci(uci)
+            if m in board.legal_moves:
+                board.push(m)
                 move_history.append(uci)
+            else:
+                # Shouldn't happen with a valid book — bail and start from wherever we got
+                print(f"  [warn] opening move {uci} illegal in position — truncating", file=sys.stderr)
+                break
 
     while not board.is_game_over(claim_draw=True) and len(move_history) < max_moves * 2:
         player = white if board.turn == chess.WHITE else black
@@ -340,12 +389,13 @@ def play_game(
 
     outcome = board.outcome(claim_draw=True)
     if outcome is None:
-        return "1/2-1/2"
+        return "1/2-1/2", "move_limit"
+    termination = outcome.termination.name.lower()
     if outcome.winner is chess.WHITE:
-        return "1-0"
+        return "1-0", termination
     if outcome.winner is chess.BLACK:
-        return "0-1"
-    return "1/2-1/2"
+        return "0-1", termination
+    return "1/2-1/2", termination
 
 
 def _score_from_result(result: str, player_is_white: bool) -> float:
@@ -438,6 +488,8 @@ def cmd_stockfish(args: argparse.Namespace) -> None:
     total_w = total_l = total_d = 0
     games_played = 0
     sf: StockfishPlayer | None = None
+    rng = random.Random(args.seed)
+    opening_book = _load_opening_book()
 
     def _round(x: float) -> int:
         return int(round(x / args.elo_step) * args.elo_step)
@@ -464,7 +516,8 @@ def cmd_stockfish(args: argparse.Namespace) -> None:
             white = patzer if patzer_is_white else sf
             black = sf if patzer_is_white else patzer
 
-            result = play_game(white, black)
+            opening_moves = rng.choice(opening_book)
+            result, termination = play_game(white, black, opening_moves=opening_moves)
             score = _score_from_result(result, patzer_is_white)
 
             if score == 1.0:
@@ -492,10 +545,12 @@ def cmd_stockfish(args: argparse.Namespace) -> None:
                 white=pname if patzer_is_white else sf_name,
                 black=sf_name if patzer_is_white else pname,
                 result=result,
+                termination=termination,
                 white_checkpoint=rel_ckpt if patzer_is_white else None,
                 black_checkpoint=None if patzer_is_white else rel_ckpt,
                 white_iter=patzer.iter_num if patzer_is_white else None,
                 black_iter=None if patzer_is_white else patzer.iter_num,
+                opening=" ".join(opening_moves),
                 temperature=args.temperature,
                 top_k=args.top_k,
                 conditioning=args.conditioning,
@@ -558,6 +613,8 @@ def cmd_head2head(args: argparse.Namespace) -> None:
         models = [models[i] for i in keep_idx]
         names = [names[i] for i in keep_idx]
 
+    opening_book = _load_opening_book()
+
     for i, j in pairs:
         a, b = models[i], models[j]
         na, nb = names[i], names[j]
@@ -565,7 +622,7 @@ def cmd_head2head(args: argparse.Namespace) -> None:
         print(f"\n[head2head] {na} vs {nb}  ({args.games} games)")
         w = l = d = 0
         for game_idx in range(args.games):
-            opening_line = rng.choice(OPENING_LINES_UCI)
+            opening_moves = rng.choice(opening_book)
             a_is_white = game_idx % 2 == 0
             white, black = (a, b) if a_is_white else (b, a)
             wname, bname = (na, nb) if a_is_white else (nb, na)
@@ -573,7 +630,7 @@ def cmd_head2head(args: argparse.Namespace) -> None:
             witer = (a if a_is_white else b).iter_num
             biter = (b if a_is_white else a).iter_num
 
-            result = play_game(white, black, opening=opening_line)
+            result, termination = play_game(white, black, opening_moves=opening_moves)
             score_a = _score_from_result(result, a_is_white)
             if score_a == 1.0:
                 w += 1; tag = f"{na} wins"
@@ -582,13 +639,13 @@ def cmd_head2head(args: argparse.Namespace) -> None:
             else:
                 d += 1; tag = "draw"
 
-            opening_str = " ".join(opening_line)
-            print(f"  [{game_idx+1}/{args.games}] {wname}(W) vs {bname}(B) → {result} ({tag})")
+            print(f"  [{game_idx+1}/{args.games}] {wname}(W) vs {bname}(B) → {result} ({tag}) [{termination}]")
             insert_game(
                 white=wname, black=bname, result=result,
+                termination=termination,
                 white_checkpoint=wrel, black_checkpoint=brel,
                 white_iter=witer, black_iter=biter,
-                opening=opening_str,
+                opening=" ".join(opening_moves),
                 temperature=args.temperature, top_k=args.top_k,
                 conditioning=args.conditioning,
             )
@@ -858,14 +915,17 @@ def cmd_history(args: argparse.Namespace) -> None:
         print(f"No games found matching '{args.player}'.")
         return
 
-    print(f"\n{'Date':<26} {'White':<25} {'Black':<25} {'Result':<8} Opening")
-    print("-" * 100)
+    print(f"\n{'Date':<26} {'White':<22} {'Black':<22} {'Result':<8} {'End':<22} Opening")
+    print("-" * 115)
     for g in games:
         date = g["timestamp"][:19].replace("T", " ")
         opening = g["opening"] or ""
-        if len(opening) > 25:
-            opening = opening[:22] + "..."
-        print(f"{date:<26} {g['white']:<25} {g['black']:<25} {g['result']:<8} {opening}")
+        if len(opening) > 28:
+            opening = opening[:25] + "..."
+        termination = g.get("termination") or ""
+        print(
+            f"{date:<26} {g['white']:<22} {g['black']:<22} {g['result']:<8} {termination:<22} {opening}"
+        )
 
 
 def cmd_progress(args: argparse.Namespace) -> None:
@@ -880,13 +940,14 @@ def cmd_progress(args: argparse.Namespace) -> None:
         print(f"No games found for '{version}'.")
         return
 
-    # Only look at games where one side is a patzer model and the other is stockfish
+    # Only look at games where one side is a patzer model and the other is stockfish.
+    # Use startswith to avoid patzer_v2 matching patzer_v20, patzer_v22, etc.
     sf_games: dict[int, list[dict]] = {}  # iter_num -> list of games
     for g in games:
         w, b = g["white"], g["black"]
-        if version in w and b.startswith("stockfish:"):
+        if w.startswith(version) and b.startswith("stockfish:"):
             it = g.get("white_iter")
-        elif version in b and w.startswith("stockfish:"):
+        elif b.startswith(version) and w.startswith("stockfish:"):
             it = g.get("black_iter")
         else:
             continue
@@ -903,7 +964,7 @@ def cmd_progress(args: argparse.Namespace) -> None:
     for it in iters:
         sub_games = sf_games[it]
         ratings = compute_ratings(sub_games)
-        patzer_ratings = [r for r in ratings if version in r.name and not r.name.startswith("stockfish:")]
+        patzer_ratings = [r for r in ratings if r.name.startswith(version) and not r.name.startswith("stockfish:")]
         if patzer_ratings:
             elos.append(patzer_ratings[0].elo)
         else:
@@ -949,9 +1010,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sf.add_argument("--elo-step", type=int, default=10, dest="elo_step")
     p_sf.add_argument("--stockfish", default=DEFAULT_STOCKFISH, help="Stockfish binary path")
     p_sf.add_argument("--device", default="cpu")
-    p_sf.add_argument("--temperature", type=float, default=0.0)
+    p_sf.add_argument("--temperature", type=float, default=0.01)
     p_sf.add_argument("--top-k", type=int, default=None, dest="top_k")
     p_sf.add_argument("--conditioning", default="match_color", choices=CONDITIONING_OPTIONS)
+    p_sf.add_argument("--seed", type=int, default=None,
+                       help="RNG seed for opening selection (default: random)")
     p_sf.add_argument("--db", default=str(DB_PATH), help="Database path")
 
     # --- head2head ---
@@ -961,10 +1024,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_h2h.add_argument("--round-robin", action="store_true", dest="round_robin",
                         help="All-pairs if >2 checkpoints")
     p_h2h.add_argument("--device", default="cpu")
-    p_h2h.add_argument("--temperature", type=float, default=0.0)
+    p_h2h.add_argument("--temperature", type=float, default=0.01)
     p_h2h.add_argument("--top-k", type=int, default=None, dest="top_k")
     p_h2h.add_argument("--conditioning", default="match_color", choices=CONDITIONING_OPTIONS)
-    p_h2h.add_argument("--seed", type=int, default=42)
+    p_h2h.add_argument("--seed", type=int, default=None,
+                        help="RNG seed for opening selection (default: random)")
     p_h2h.add_argument("--db", default=str(DB_PATH), help="Database path")
 
     # --- rr-prefix ---
@@ -977,10 +1041,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_rr.add_argument("--no-best", action="store_true", help="Exclude weights_best.pt (default: include)")
     p_rr.add_argument("--games", type=int, default=12, help="Games per pair (default 12)")
     p_rr.add_argument("--device", default="cpu")
-    p_rr.add_argument("--temperature", type=float, default=0.0)
+    p_rr.add_argument("--temperature", type=float, default=0.01)
     p_rr.add_argument("--top-k", type=int, default=None, dest="top_k")
     p_rr.add_argument("--conditioning", default="match_color", choices=CONDITIONING_OPTIONS)
-    p_rr.add_argument("--seed", type=int, default=42)
+    p_rr.add_argument("--seed", type=int, default=None,
+                       help="RNG seed for opening selection (default: random)")
     p_rr.add_argument("--db", default=str(DB_PATH), help="Database path")
 
     # --- rr-leaderboard ---
@@ -994,10 +1059,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Optional cap: only take top N players by current Elo")
     p_rrlb.add_argument("--games", type=int, default=12, help="Games per pair (default 12)")
     p_rrlb.add_argument("--device", default="cpu")
-    p_rrlb.add_argument("--temperature", type=float, default=0.0)
+    p_rrlb.add_argument("--temperature", type=float, default=0.01)
     p_rrlb.add_argument("--top-k", type=int, default=None, dest="top_k")
     p_rrlb.add_argument("--conditioning", default="match_color", choices=CONDITIONING_OPTIONS)
-    p_rrlb.add_argument("--seed", type=int, default=42)
+    p_rrlb.add_argument("--seed", type=int, default=None,
+                         help="RNG seed for opening selection (default: random)")
     p_rrlb.add_argument("--db", default=str(DB_PATH), help="Database path")
     p_rrlb.add_argument("--no-prompt", action="store_true", help="Use the whole displayed top 20 (Patzer only) without prompting")
 

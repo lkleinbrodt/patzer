@@ -92,6 +92,9 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 # WSD schedule settings (only used when lr_schedule = 'wsd')
 cooldown_start_iter = None # None = no cooldown (constant LR after warmup); set to iter to begin decay
 cooldown_iters = 30000 # length of linear ramp-down from learning_rate to min_lr
+# If True, automatically trigger the cooldown when early stopping would fire instead of stopping.
+# Resets patience and extends max_iters so the cooldown runs to completion in the same job.
+auto_cooldown = False
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
@@ -226,6 +229,11 @@ elif init_from == 'resume':
     best_val_loss = checkpoint['best_val_loss']
     evals_without_improvement = int(checkpoint.get('evals_without_improvement', 0))
     wandb_run_id = str(checkpoint.get('wandb_run_id', wandb_run_id or ""))
+    # Restore cooldown_start_iter so mid-cooldown resumes keep the correct decay curve.
+    # The config value takes precedence if explicitly set (not None), otherwise fall back
+    # to whatever was saved (handles auto_cooldown triggering on a previous run).
+    if cooldown_start_iter is None:
+        cooldown_start_iter = checkpoint.get('cooldown_start_iter', None)
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -429,6 +437,7 @@ while True:
                     'val_loss': val_loss,
                     'best_val_loss': best_val_loss,
                     'evals_without_improvement': evals_without_improvement,
+                    'cooldown_start_iter': cooldown_start_iter,
                     'config': config,
                     'wandb_run_id': wandb_run_id,
                 }
@@ -523,12 +532,23 @@ while True:
         and iter_num >= early_stop_min_iters
         and evals_without_improvement >= early_stop_patience_evals
     ):
-        if master_process:
-            print(
-                f"early stop: val loss did not improve for {early_stop_patience_evals} evals "
-                f"(eval_interval={eval_interval}), at iter {iter_num}"
-            )
-        break
+        if auto_cooldown and lr_schedule == 'wsd' and cooldown_start_iter is None:
+            # Instead of stopping, trigger the WSD cooldown and keep going.
+            cooldown_start_iter = iter_num
+            max_iters = iter_num + cooldown_iters
+            evals_without_improvement = 0
+            if master_process:
+                print(
+                    f"auto_cooldown: plateau after {early_stop_patience_evals} evals at iter {iter_num}; "
+                    f"starting WSD cooldown → will finish at iter {max_iters}"
+                )
+        else:
+            if master_process:
+                print(
+                    f"early stop: val loss did not improve for {early_stop_patience_evals} evals "
+                    f"(eval_interval={eval_interval}), at iter {iter_num}"
+                )
+            break
 
 if ddp:
     destroy_process_group()
