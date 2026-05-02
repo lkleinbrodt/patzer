@@ -18,6 +18,7 @@ import chess
 import torch
 import torch.nn.functional as F
 
+from checkpoint_util import load_checkpoint
 from model import GPT, GPTConfig
 from tokenizer import ChessTokenizer
 
@@ -79,15 +80,29 @@ def _build_token_ids(tok: ChessTokenizer, board: chess.Board, move_history: list
     return ids
 
 
+def _prefix_len(tok: ChessTokenizer, token_ids: list[int]) -> int:
+    """Tokens after GAME_START that must stay when cropping (result token if present)."""
+    if not token_ids or token_ids[0] != tok.game_start_id:
+        return 0
+    if len(token_ids) >= 2 and token_ids[1] in (
+        tok.white_win_id,
+        tok.black_win_id,
+        tok.draw_id,
+    ):
+        return 2
+    return 1
+
+
 def _crop_sequence(token_ids: list[int], block_size: int, tok: ChessTokenizer) -> list[int]:
     if len(token_ids) <= block_size:
         return token_ids
-    if len(token_ids) >= 2 and token_ids[0] == tok.game_start_id:
-        tail_budget = block_size - 2
+    plen = _prefix_len(tok, token_ids)
+    if plen:
+        tail_budget = block_size - plen
         if tail_budget < 1:
             return token_ids[:block_size]
-        tail = token_ids[2:][-tail_budget:]
-        return token_ids[:2] + tail
+        tail = token_ids[plen:][-tail_budget:]
+        return token_ids[:plen] + tail
     return token_ids[-block_size:]
 
 
@@ -134,7 +149,7 @@ def main() -> None:
     if not os.path.exists(ckpt_path):
         raise SystemExit(f"No checkpoint at {ckpt_best} or {ckpt_fallback}")
 
-    checkpoint = torch.load(ckpt_path, map_location=device_t, weights_only=False)
+    checkpoint = load_checkpoint(ckpt_path, map_location=device_t)
     ma = checkpoint["model_args"]
     if ma.get("vocab_size") != tok.vocab_size:
         raise SystemExit(

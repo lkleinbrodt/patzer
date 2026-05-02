@@ -30,6 +30,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group, broadcast
 
 from model import GPTConfig, GPT
+from checkpoint_util import load_checkpoint
 import r2
 
 # -----------------------------------------------------------------------------
@@ -208,7 +209,7 @@ elif init_from == 'resume':
             f"init_from=resume but checkpoint not found at {ckpt_path}. "
             f"Did you forget to download from R2 (or set R2 env vars)?"
         )
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = load_checkpoint(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
@@ -248,8 +249,9 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
 
-# initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+# GradScaler only applies to CUDA fp16; deprecated torch.cuda.amp.GradScaler → torch.amp.GradScaler
+_scaler_enabled = device_type == 'cuda' and dtype == 'float16'
+scaler = torch.amp.GradScaler('cuda', enabled=_scaler_enabled)
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
@@ -277,7 +279,7 @@ if init_from == 'resume':
     _best_path = os.path.join(out_dir, 'weights_best.pt')
     if os.path.exists(_best_path):
         try:
-            _prev = torch.load(_best_path, map_location='cpu', weights_only=False)
+            _prev = load_checkpoint(_best_path, map_location='cpu')
             _last_r2_upload_iter = int(_prev.get('iter_num', 0))
             _last_r2_best_val_loss = float(_prev.get('val_loss', float('inf')))
             # Initialize snapshot counter to resume iter so we wait a full interval
@@ -327,9 +329,9 @@ def estimate_loss():
 
 # learning rate decay scheduler
 def get_lr(it):
-    # linear warmup (shared by both schedules)
+    # linear warmup (shared by both schedules); floor at min_lr for consistency with cosine tail
     if it < warmup_iters:
-        return learning_rate * (it + 1) / (warmup_iters + 1)
+        return max(min_lr, learning_rate * (it + 1) / (warmup_iters + 1))
     if lr_schedule == 'wsd':
         # WSD: warmup → stable (constant LR) → linear cooldown
         if cooldown_start_iter is not None and it >= cooldown_start_iter:
@@ -340,8 +342,8 @@ def get_lr(it):
         # cosine decay (original nanoGPT schedule)
         if it > lr_decay_iters:
             return min_lr
-        decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-        assert 0 <= decay_ratio <= 1
+        denom = max(1, lr_decay_iters - warmup_iters)
+        decay_ratio = max(0.0, min(1.0, (it - warmup_iters) / denom))
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (learning_rate - min_lr)
 
@@ -389,16 +391,15 @@ while True:
                 "mfu": running_mfu*100,
             })
         # append to metrics log and push to R2 so training curve is always visible
-        import json as _json, time as _time
         metrics_local = os.path.join(out_dir, 'metrics.jsonl')
         with open(metrics_local, 'a') as _f:
-            _f.write(_json.dumps({
+            _f.write(json.dumps({
                 "iter": iter_num,
                 "train_loss": train_loss_eval,
                 "val_loss": val_loss,
                 "lr": lr,
                 "mfu": round(running_mfu * 100, 2),
-                "ts": _time.time(),
+                "ts": time.time(),
             }) + "\n")
         r2.push_async(metrics_local, f"{out_dir}/metrics.jsonl")
 

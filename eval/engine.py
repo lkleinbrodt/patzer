@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from eval.db import player_name
 
+from patzer.checkpoint_util import load_checkpoint
 from patzer.model import GPT, GPTConfig
 from patzer.tokenizer import ChessTokenizer
 
@@ -60,7 +61,7 @@ class Patzer:
         )
 
     def _load_model(self, path: Path) -> tuple[GPT, int]:
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        checkpoint = load_checkpoint(path, map_location=self.device)
         config = GPTConfig(**checkpoint["model_args"])
         # IMPORTANT: keep stdout clean for UCI protocol users of this class.
         # `GPT.__init__` prints parameter counts; route that to stderr.
