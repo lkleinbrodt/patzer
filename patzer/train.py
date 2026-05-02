@@ -251,7 +251,8 @@ model.to(device)
 
 # GradScaler only applies to CUDA fp16; deprecated torch.cuda.amp.GradScaler → torch.amp.GradScaler
 _scaler_enabled = device_type == 'cuda' and dtype == 'float16'
-scaler = torch.amp.GradScaler('cuda', enabled=_scaler_enabled)
+_scaler_device = 'cuda' if device_type == 'cuda' else 'cpu'
+scaler = torch.amp.GradScaler(_scaler_device, enabled=_scaler_enabled)
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
@@ -329,9 +330,9 @@ def estimate_loss():
 
 # learning rate decay scheduler
 def get_lr(it):
-    # linear warmup (shared by both schedules); floor at min_lr for consistency with cosine tail
+    # linear warmup (shared by both schedules)
     if it < warmup_iters:
-        return max(min_lr, learning_rate * (it + 1) / (warmup_iters + 1))
+        return learning_rate * (it + 1) / (warmup_iters + 1)
     if lr_schedule == 'wsd':
         # WSD: warmup → stable (constant LR) → linear cooldown
         if cooldown_start_iter is not None and it >= cooldown_start_iter:
