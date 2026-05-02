@@ -14,7 +14,11 @@ Usage:
   python r2.py push checkpoints/patzer_v2       # upload a checkpoint dir
   python r2.py copy src/r2/key dst/r2/key       # server-side copy [--force]
 
-pull_dir skips files that already exist locally (use --force to re-download).
+pull_dir skips files that already exist locally when they match R2 (ETag sidecar),
+or when R2 is unreachable (same behavior as is_fresh). Use --force to always
+re-download. Pushes write `.r2meta` sidecars after upload so freshness checks work.
+
+The boto3 client is cached with adaptive retries on the underlying botocore session.
 """
 
 import atexit
@@ -22,8 +26,11 @@ import itertools
 import os
 import shutil
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from botocore.config import Config
 
 # Single-worker executor: uploads queue up and never run concurrently, so
 # there's no risk of two in-flight uploads stomping each other on R2.
@@ -35,25 +42,41 @@ atexit.register(_executor.shutdown, wait=True)
 # same local_path is enqueued again before a prior upload of that path finishes.
 _upload_counter = itertools.count()
 
+_client_lock = threading.Lock()
+_client_cache: tuple[object, str] | None = None
+
 
 def _client():
-    import boto3
-    from dotenv import load_dotenv
-    load_dotenv()
-    endpoint = os.environ.get("R2_ENDPOINT_URL", "").strip()
-    key_id = os.environ.get("R2_ACCESS_KEY_ID", "").strip()
-    secret = os.environ.get("R2_SECRET_ACCESS_KEY", "").strip()
-    if not all([endpoint, key_id, secret]) or "<YOUR_CLOUDFLARE" in endpoint:
-        return None, None
-    bucket = os.environ.get("R2_BUCKET", "patzer").strip()
-    client = boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=key_id,
-        aws_secret_access_key=secret,
-        region_name="auto",
-    )
-    return client, bucket
+    """Return a cached (boto3 client, bucket) or (None, None) if R2 is not configured."""
+    global _client_cache
+    with _client_lock:
+        if _client_cache is not None:
+            return _client_cache
+        import boto3
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        endpoint = os.environ.get("R2_ENDPOINT_URL", "").strip()
+        key_id = os.environ.get("R2_ACCESS_KEY_ID", "").strip()
+        secret = os.environ.get("R2_SECRET_ACCESS_KEY", "").strip()
+        if not all([endpoint, key_id, secret]) or "<YOUR_CLOUDFLARE" in endpoint:
+            return None, None
+        bucket = os.environ.get("R2_BUCKET", "patzer").strip()
+        cfg = Config(
+            retries={"max_attempts": 10, "mode": "adaptive"},
+            connect_timeout=60,
+            read_timeout=300,
+        )
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=key_id,
+            aws_secret_access_key=secret,
+            region_name="auto",
+            config=cfg,
+        )
+        _client_cache = (client, bucket)
+        return _client_cache
 
 
 def push_file(local_path: str | Path, r2_key: str | None = None) -> bool:
@@ -66,6 +89,7 @@ def push_file(local_path: str | Path, r2_key: str | None = None) -> bool:
         r2_key = str(local_path)
     print(f"[r2] pushing {local_path} → {r2_key}")
     client.upload_file(str(local_path), bucket, r2_key)
+    _write_sidecar_from_remote(client, bucket, r2_key, local_path)
     return True
 
 
@@ -84,7 +108,12 @@ def push_file_threadsafe(local_path: str | Path, r2_key: str | None = None) -> b
         r2_key = str(local_path)
     print(f"[r2] pushing {local_path} → {r2_key}")
     with open(local_path, "rb") as f:
-        client.put_object(Bucket=bucket, Key=r2_key, Body=f)
+        resp = client.put_object(Bucket=bucket, Key=r2_key, Body=f)
+    etag = (resp.get("ETag") or "").strip('"')
+    if etag:
+        _write_sidecar(local_path, etag)
+    else:
+        _write_sidecar_from_remote(client, bucket, r2_key, local_path)
     return True
 
 
@@ -128,6 +157,7 @@ def push_async(
         try:
             print(f"[r2] pushing {local_path} → {r2_key} (async)")
             client.upload_file(str(tmp), bucket, r2_key)
+            _write_sidecar_from_remote(client, bucket, r2_key, local_path)
             if then_copy_to:
                 copy_object(r2_key, then_copy_to, overwrite=False)
         except Exception as exc:
@@ -154,16 +184,26 @@ def _write_sidecar(local_path: Path, etag: str) -> None:
     _sidecar(local_path).write_text(etag)
 
 
-def get_etag(r2_key: str) -> str | None:
-    """Return the ETag for an R2 object, or None if not found / R2 not configured."""
-    client, bucket = _client()
-    if client is None:
-        return None
+def _remote_etag(client, bucket: str, r2_key: str) -> str | None:
     try:
         resp = client.head_object(Bucket=bucket, Key=r2_key)
         return resp["ETag"].strip('"')
     except Exception:
         return None
+
+
+def _write_sidecar_from_remote(client, bucket: str, r2_key: str, local_path: Path) -> None:
+    etag = _remote_etag(client, bucket, r2_key)
+    if etag:
+        _write_sidecar(local_path, etag)
+
+
+def get_etag(r2_key: str) -> str | None:
+    """Return the ETag for an R2 object, or None if not found / R2 not configured."""
+    client, bucket = _client()
+    if client is None:
+        return None
+    return _remote_etag(client, bucket, r2_key)
 
 
 def is_fresh(r2_key: str, local_path: Path) -> bool:
@@ -199,7 +239,11 @@ def list_weights(r2_prefix: str) -> list[str]:
 
 
 def pull_file(r2_key: str, local_path: str | Path | None = None, *, skip_existing: bool = False) -> bool:
-    """Download a single file and write an ETag sidecar. local_path defaults to r2_key."""
+    """Download a single file and write an ETag sidecar. local_path defaults to r2_key.
+
+    When skip_existing is True, skips the download if the local file is fresh
+    (sidecar ETag matches R2); otherwise re-pulls.
+    """
     client, bucket = _client()
     if client is None:
         return False
@@ -207,16 +251,14 @@ def pull_file(r2_key: str, local_path: str | Path | None = None, *, skip_existin
         local_path = Path(r2_key)
     local_path = Path(local_path)
     if skip_existing and local_path.exists():
-        print(f"[r2] skipping {r2_key} (already local)")
-        return True
+        if is_fresh(r2_key, local_path):
+            print(f"[r2] skipping {r2_key} (fresh local copy)")
+            return True
+        print(f"[r2] re-pulling {r2_key} (stale or missing sidecar)")
     local_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"[r2] pulling {r2_key} → {local_path}")
     client.download_file(bucket, r2_key, str(local_path))
-    try:
-        etag = client.head_object(Bucket=bucket, Key=r2_key)["ETag"].strip('"')
-        _write_sidecar(local_path, etag)
-    except Exception:
-        pass
+    _write_sidecar_from_remote(client, bucket, r2_key, local_path)
     return True
 
 
@@ -239,7 +281,12 @@ def push_dir(local_dir: str | Path, r2_prefix: str | None = None) -> bool:
 
 
 def pull_dir(r2_prefix: str, local_dir: str | Path | None = None, *, skip_existing: bool = True) -> bool:
-    """Download all objects under r2_prefix into local_dir. Skips existing files by default."""
+    """Download all objects under r2_prefix into local_dir.
+
+    With skip_existing (default True), skips files whose local ETag sidecar
+    matches R2; re-downloads when missing, stale, or when remote is unreachable
+    (is_fresh treats unreachable as skip). Use skip_existing=False to always pull.
+    """
     client, bucket = _client()
     if client is None:
         return False
@@ -255,12 +302,15 @@ def pull_dir(r2_prefix: str, local_dir: str | Path | None = None, *, skip_existi
             rel = key[len(r2_prefix):].lstrip("/")
             local_path = local_dir / rel
             if skip_existing and local_path.exists():
-                print(f"[r2] skipping {key} (already local)")
-                skipped += 1
-                continue
+                if is_fresh(key, local_path):
+                    print(f"[r2] skipping {key} (fresh local copy)")
+                    skipped += 1
+                    continue
+                print(f"[r2] re-pulling {key} (stale or missing sidecar)")
             local_path.parent.mkdir(parents=True, exist_ok=True)
             print(f"[r2] pulling {key} → {local_path}")
             client.download_file(bucket, key, str(local_path))
+            _write_sidecar_from_remote(client, bucket, key, local_path)
             downloaded += 1
     print(f"[r2] pulled {downloaded} files, skipped {skipped} into {local_dir}")
     return downloaded > 0 or skipped > 0
