@@ -60,6 +60,7 @@ def _client():
         key_id = os.environ.get("R2_ACCESS_KEY_ID", "").strip()
         secret = os.environ.get("R2_SECRET_ACCESS_KEY", "").strip()
         if not all([endpoint, key_id, secret]) or "<YOUR_CLOUDFLARE" in endpoint:
+            _client_cache = (None, None)
             return None, None
         bucket = os.environ.get("R2_BUCKET", "patzer").strip()
         cfg = Config(
@@ -157,7 +158,8 @@ def push_async(
         try:
             print(f"[r2] pushing {local_path} → {r2_key} (async)")
             client.upload_file(str(tmp), bucket, r2_key)
-            _write_sidecar_from_remote(client, bucket, r2_key, local_path)
+            # Intentionally no sidecar write: local_path may have been
+            # overwritten by the caller while upload ran (async contract).
             if then_copy_to:
                 copy_object(r2_key, then_copy_to, overwrite=False)
         except Exception as exc:
@@ -210,15 +212,16 @@ def is_fresh(r2_key: str, local_path: Path) -> bool:
     """
     True if the local file matches R2 (via stored ETag sidecar).
     Falls back to True when R2 is unreachable so we don't block offline runs.
+    Files with no sidecar are treated as stale only when R2 is reachable.
     """
     if not local_path.exists():
         return False
     local = _read_sidecar(local_path)
-    if local is None:
-        return False  # no sidecar → treat as stale
     remote = get_etag(r2_key)
     if remote is None:
-        return True   # R2 unreachable → assume fresh
+        return True   # R2 unreachable → assume fresh (offline mode)
+    if local is None:
+        return False  # R2 online but no sidecar → re-pull to get fresh sidecar
     return local == remote
 
 
