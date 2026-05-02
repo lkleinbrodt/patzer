@@ -402,7 +402,7 @@ while True:
                 "mfu": round(running_mfu * 100, 2),
                 "ts": time.time(),
             }) + "\n")
-        r2.push_async(metrics_local, f"{out_dir}/metrics.jsonl")
+        r2.push_file_threadsafe(metrics_local, f"{out_dir}/metrics.jsonl")
 
         # improved: any genuine val drop — governs local saving and best_val_loss tracking.
         # improved_significant: val drop exceeds ckpt_best_min_delta — governs early-stop
