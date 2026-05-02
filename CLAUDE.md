@@ -71,9 +71,10 @@ python launch.py --list
 ```bash
 cd patzer
 python r2.py push data/prepared                                      # upload tokenized data
-python r2.py pull checkpoints/patzer_v2/weights_best.pt              # pull single file (skips if exists)
-python r2.py pull checkpoints/patzer_v2                              # pull full dir (skips existing)
-python r2.py pull checkpoints/patzer_v2/weights_best.pt --force      # re-download even if local copy exists
+python r2.py pull checkpoints/patzer_v2/weights_best.pt              # pull single file (skips if fresh)
+python r2.py pull checkpoints/patzer_v2                              # pull full dir (skips fresh files)
+python r2.py pull checkpoints/patzer_v2/weights_best.pt --force      # re-download even if local copy is fresh
+python r2.py copy checkpoints/patzer_v2/ckpt.pt checkpoints/patzer_v2/weights_best.pt  # server-side copy [--force]
 ```
 
 ### Tokenizer sanity check
@@ -160,6 +161,8 @@ Lichess .pgn.zst dumps
 
 `train.py` and `sample.py` use a "poor man's configurator": `exec(open('configurator.py').read())` is called after setting default globals. `configurator.py` reads `sys.argv` and either execs a named config file (e.g. `config/train_patzer.py`) or applies `--key=value` overrides directly into `globals()`. This means config files simply reassign module-level variables, and CLI flags override them. **All scripts must be run from within the `patzer/` directory** because `configurator.py` is loaded by relative path.
 
+`--key=value` uses `split('=', 1)` so values containing `=` are handled correctly. Config defaults of `None` accept any typed override (type check is skipped when the existing value is `None`).
+
 ### Tokenizer (`patzer/tokenizer.py`)
 
 Vocabulary is built deterministically from all possible UCI move strings (not from training data) plus 6 special tokens: `<PAD>`, `<GAME_START>`, `<GAME_END>`, `<WHITE_WIN>`, `<BLACK_WIN>`, `<DRAW>`. Vocab size is ~4214. Game encoding format: `<GAME_START> <RESULT> move1 move2 ... <GAME_END>` — the result token is prepended so the model is conditioned on outcome from position 0.
@@ -171,6 +174,8 @@ Standard nanoGPT (Karpathy): `Block = CausalSelfAttention + MLP`, pre-norm with 
 ### Training loop (`patzer/train.py`)
 
 Direct port of nanoGPT. Data loading uses `np.memmap` (recreated each batch to avoid memory leaks). Supports DDP via `torchrun`. With `always_save_checkpoint=True`, `ckpt.pt` is the **latest** eval (optimizer + iter for resume). `weights_best.pt` is written only when val improves (weights-only for play/eval). Optional `weights_iter_*.pt` snapshots can be created on best improvements. Optional `early_stop_patience_evals` / `early_stop_min_iters` stop when val plateaus. Eval estimates loss over `eval_iters` batches for both train and val splits.
+
+Checkpoint loading uses `patzer/checkpoint_util.py` (`load_checkpoint`): prefers `weights_only=True` with `GPTConfig` allow-listed, falls back to `weights_only=False` for legacy pickles. `GradScaler` is only created on CUDA + fp16 (no-op on MPS/CPU).
 
 ### LR schedules (`lr_schedule` config key)
 
@@ -187,6 +192,8 @@ WSD config knobs: `cooldown_start_iter` (None = no cooldown, constant LR), `cool
 ### R2 storage (`patzer/r2.py`)
 
 Cloudflare R2 (S3-compatible) is used to persist training data and checkpoints. Mirrors local path structure exactly. All functions are silent no-ops when R2 env vars are unset — safe to run locally without credentials. Required env vars: `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ACCOUNT_ID` (set in `.env`).
+
+The boto3 client is cached as a thread-safe singleton with adaptive retries (10 attempts) and longer timeouts (60s connect, 300s read). Push operations write a `.r2meta` ETag sidecar alongside each local file; pull operations skip files whose sidecar ETag matches R2 (`is_fresh`). Files without a sidecar are re-pulled when R2 is reachable, skipped when offline.
 
 ### Cloud launch (`launch.py`)
 
