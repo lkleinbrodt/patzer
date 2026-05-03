@@ -115,6 +115,9 @@ python eval/evaluate.py head2head checkpoints/patzer_v2/weights_best.pt checkpoi
 # Round-robin across multiple checkpoints
 python eval/evaluate.py head2head checkpoints/patzer_v2/weights_iter_010000.pt checkpoints/patzer_v2/weights_iter_050000.pt checkpoints/patzer_v2/weights_best.pt --round-robin --games 10 --device mps
 
+# Gauntlet: challenger vs each selected leaderboard opponent (no games among opponents); interactive rank pick or --no-prompt (default ranks 1–10)
+python eval/evaluate.py gauntlet patzer_v4@best --games 50 --device mps
+
 # Show unified Elo leaderboard (computed from all stored games)
 python eval/evaluate.py leaderboard
 
@@ -141,6 +144,10 @@ LICHESS_BOT_TOKEN=... python bot/deploy_bot.py run v2
 ```
 
 See `bot/README.md`. Per-bot secrets: `LICHESS_BOT_TOKEN` env or `bot/configs/*.local.yml` (gitignored).
+
+### Lichess dashboard (bot game history)
+
+`python dashboard/run.py` — Flask API + `dashboard/lichess_games.db` (**not** `eval/results.db`). Tokens: `PATZER_V1_TOKEN` … `PATZER_V4_TOKEN`. Optional `PATZER_VN_USERNAME` for Lichess API export; **v2 defaults to `patzer_v2b`** (the live account name); DB rows still use `bot_version=patzer_v2`.
 
 ## Architecture
 

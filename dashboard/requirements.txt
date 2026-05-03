@@ -1,0 +1,5 @@
+flask>=3.0
+flask-cors
+berserk>=0.13
+python-chess>=1.10
+python-dotenv

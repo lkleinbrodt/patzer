@@ -193,20 +193,23 @@ Also introduces the **WSD (Warmup-Stable-Decay)** LR schedule, replacing cosine.
 ### Training
 
 
-| param       | value                                            |
-| ----------- | ------------------------------------------------ |
-| data        | ~2.85B train tokens, 1800+ ELO, ~36.3M games     |
-| batch_size  | 128 (physical, no gradient accumulation)         |
-| lr_schedule | WSD (warmup → stable → linear cooldown)          |
-| lr          | 6e-4 (constant after warmup)                     |
-| cooldown    | 30k iters, linear ramp to 1e-5                   |
-| max_iters   | 600k cap (early stop ends phase 1 sooner)        |
-| compile     | True                                             |
-| hardware    | RTX 4060 Ti (16 GB)                              |
-| step time   | ~318 ms/step (observed at iter 74k–75k)          |
-| throughput  | ~103k tokens/sec                                 |
-| eval time   | ~58,000 ms/eval (compute ~40s + R2 sync ~16–20s) |
-| mfu         | ~7–8% (rising; 7.23% at eval, ~8% mid-run)       |
+| param            | value                                                          |
+| ---------------- | -------------------------------------------------------------- |
+| data             | ~2.85B train tokens, 1800+ ELO, ~36.3M games                   |
+| batch_size       | 128 (physical, no gradient accumulation)                       |
+| lr_schedule      | WSD (warmup → stable → linear cooldown)                        |
+| lr               | 6e-4 (constant after warmup)                                   |
+| cooldown         | 30k iters, linear ramp to 1e-5                                 |
+| max_iters        | 600k cap (phase 1 early-stopped at 145k)                       |
+| compile          | True                                                           |
+| val loss (best)  | **1.501** (iter 201k, slow drift at min_lr after cooldown)     |
+| stable phase end | iter 145k @ val 1.6566 (early stop, patience=25)               |
+| cooldown end     | iter 170k @ val 1.507                                          |
+| hardware         | RTX 4060 Ti (16 GB)                                            |
+| step time        | ~318 ms/step (observed at iter 74k–75k)                        |
+| throughput       | ~103k tokens/sec                                               |
+| eval time        | ~58,000 ms/eval (compute ~40s + R2 sync ~16–20s)               |
+| mfu              | ~7–8% (rising; 7.23% at eval, ~8% mid-run)                     |
 
 
 **Throughput:** 128 × 256 = 32,768 tokens/iter → ~86,898 iters/epoch.
@@ -223,12 +226,29 @@ Also introduces the **WSD (Warmup-Stable-Decay)** LR schedule, replacing cosine.
 3. `**gradient_accumulation_steps` = 1, `batch_size` = 128** — same effective batch, fewer Python/optimizer overheads. Expected ~1.3–1.7× faster step time. Falls back to batch 96 if 128 OOMs on 12GB.
 4. `**compile = True`** — explicit torch.compile for ~1.2–1.4× on Ampere+.
 
-### Lessons so far (in-progress)
+### Lessons
 
 - **Step throughput matched v3 exactly.** v3 on 4060 Ti = 321 ms/step; v4 on 4060 Ti = 318 ms/step. The "speedup checklist" from v3 (drop accum, explicit compile) delivered no actual gain because `device='auto'` on CUDA was already enabling compile in v3, and swapping 4 × batch-32 for 1 × batch-128 is identical compute. The optimization wins were already present.
 - **eval_iters=200 with batch_size=128 was a silent 4× blowup.** `estimate_loss()` runs `eval_iters` batches for each of the train and val splits = 400 total forward passes. v2/v3 used batch=32 → 12,800 sequences per eval. v4 inherited the same `eval_iters=200` but with batch=128 → **51,200 sequences** — 4× more work, ~40s of eval compute, up to 58s total including R2 sync. This wasn't caught because (a) eval time isn't printed separately in logs — it's baked into the slow iteration's `time` field, and (b) `batch_size` and `eval_iters` are set independently with no guard. Fixed mid-run by setting `eval_iters=50`, which gives the same 12,800-sequence coverage as v2/v3 and drops eval time to ~10s.
 - **R2 uploads were blocking training and uploading too frequently.** Switched to async uploads (`r2.push_async`) so training resumes immediately after `torch.save`. Added `ckpt_best_min_delta=0.001` and `ckpt_best_cooldown_steps=5000` to prevent R2 from being hammered during the early-training phase when val improves every eval. Also fixed a latent bug where snapshot `copy_object` could race against the upload and capture the previous weights; the copy is now chained inside the async task.
 - **MFU is low (~7–8%) and expected.** A 40M model on a gaming GPU is memory-bandwidth-bound, not FLOP-bound. MFU rises over the run as the running average warms up; actual steady-state is ~8%.
+
+#### WSD schedule retrospective
+
+Per-iter val-loss progress across phases:
+
+| Phase                       | iter range | Δ val loss     | nats / 1k iters |
+| --------------------------- | ---------- | -------------- | --------------- |
+| Stable, mid                 | 50k → 100k | -0.030         | 0.0006          |
+| Stable, late                | 100k → 145k | -0.013        | 0.0003          |
+| Cooldown (30k, 6e-4 → 1e-5) | 140k → 170k | -0.149        | 0.0050          |
+| Post-cooldown @ min_lr      | 170k → 201k | -0.006 (1.507→1.501) | 0.0002 (slow drift, same order as late stable) |
+
+- **The cooldown drop is *not* evidence the stable phase was wasted.** This is the expected WSD pattern (DeepSeek, MiniCPM): the stable phase accumulates representation work that the cooldown realizes as lower loss. The "10× faster per iter" ratio is misleading — without the long stable phase, the cooldown has less to extract. Confirmation: ~30k post-cooldown iters at min_lr produced only -0.006 nats of further drift (1.507 → 1.501), at a rate (~0.0002 nats/1k iters) that's the same order as the late stable phase before the cooldown. v4 is approaching the basin floor of this architecture+data combo, with diminishing returns at min_lr.
+- **3.3× data → +0.013 nats over v3 (1.514 → 1.501).** Marginal. v3's gen-gap signal of "data-bound" has flipped: v4 looks **capacity-bound** at this architecture (12L/8H/512d, ~40M params). v5 should scale architecture rather than chase more data or more schedule tuning.
+- **Manual two-phase workflow caused two restart blips (140k, 160k).** `auto_cooldown=True` (already wired in `train.py`) eliminates this — when early stop would fire, training instead triggers cooldown in-job. Use this for v5.
+- **Cooldown ratio of 30k / 145k ≈ 20% was on the low end of MiniCPM's 10–20% range.** A longer cooldown (e.g. 25–30%, ~40k iters here) might have squeezed out marginally more, but the post-cooldown stagnation suggests the headroom is small (≤0.01 nats). For v5 default to ~25–30%.
+- **Don’t lower the constant LR.** 6e-4 is doing the exploration job correctly. A lower stable LR would slow the stable phase and give the cooldown less accumulated work to realize.
 
 ---
 
