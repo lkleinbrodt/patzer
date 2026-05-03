@@ -95,7 +95,7 @@ matchmaking:
     - 0
     - 1
     - 2
-  opponent_max_rating: 2000
+  opponent_max_rating: 2400
   rating_preference: "none"
   challenge_mode: "rated"
   challenge_filter: coarse

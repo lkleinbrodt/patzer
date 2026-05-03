@@ -1,5 +1,7 @@
 I want to write one (or many) blog posts about this project. So we should keep a running log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-03:** **`MODELS.md` — v4 + unified eval refresh.** v4 marked completed (WSD phases). **Best val ~1.501 @ 201k** = **`weights_best.pt`**; training **stopped manually ~203k** (flat — confirmed). Eval table + ladder: `patzer_v4@201` **#1** (**1600 ± 11** vs `patzer_v3@180` **1579 ± 10**, Stockfish-anchored). Unified intro/table + v1–v3 numbers aligned to `results.db`; hardware v4 **50×128** ~10s eval. Follow-up: fixed accidental `~~` strikethrough / broken backticks in v4–v2–WSD bullets.
+
 - **2026-05-03:** **Lichess dashboard — CPL-by-move smoothing.** Curve applies a **centered rolling mean** over neighboring bot move indices (**±5** moves where bins exist) before plotting; methodology + tooltip note it.
 
 - **2026-05-03:** **Lichess dashboard — CPL-by-move.** Top chart plots **`avg_cpl`** vs bot move # (same **`curve_series`** SQL); title, methodology, Y-axis (**orange**), and tooltip copy updated. **`get_lichess_performance_snapshot`** docstring notes UI uses CPL.

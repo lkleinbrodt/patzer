@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Patzer is a transformer-based chess engine trained via next-token prediction on Lichess game data. The goal is a series of versioned models (v1, v2, ...) each trained, deployed as a Lichess bot, and evaluated for ELO — iterating on architecture and data quality.
 
+See **[PROJECT_LOG.md](PROJECT_LOG.md)** for a running history of development work, interesting findings, and rationale behind architectural decisions.
+
 ## Commands
 
 ### Install dependencies
@@ -35,17 +37,19 @@ python ../pipeline/prepare.py --max-games 10000 --output-dir ../data/prepared_te
 ```bash
 # Local (MPS on Mac, CPU fallback)
 cd patzer
-python train.py config/train_patzer.py --device=auto
+python train.py config/train_patzer_v4.py --device=auto
 
 # Single GPU (CUDA)
-python train.py config/train_patzer.py
+python train.py config/train_patzer_v4.py
 
 # DDP (multi-GPU)
-torchrun --standalone --nproc_per_node=4 train.py config/train_patzer.py
+torchrun --standalone --nproc_per_node=4 train.py config/train_patzer_v4.py
 
 # Resume from checkpoint
-python train.py config/train_patzer.py --init_from=resume
+python train.py config/train_patzer_v4.py --init_from=resume
 ```
+
+Replace `train_patzer_v4.py` with the versioned config you want to train (e.g., `train_patzer_v1.py`, `train_patzer_v2.py`, etc.).
 
 ### Cloud training on Vast.ai
 
@@ -54,17 +58,19 @@ python train.py config/train_patzer.py --init_from=resume
 python launch.py --search-only
 
 # Rent cheapest GPU and start training (prompts for confirmation)
-python launch.py --config train_patzer
+python launch.py --config train_patzer_v4
 
 # Run on an existing instance
-python launch.py --instance <ID> --config train_patzer
+python launch.py --instance <ID> --config train_patzer_v4
 
 # Resume training from R2 checkpoint
-python launch.py --config train_patzer --resume
+python launch.py --config train_patzer_v4 --resume
 
 # List your running instances
 python launch.py --list
 ```
+
+Replace `train_patzer_v4` with the versioned config you want to train.
 
 ### Checkpoint sync (Cloudflare R2)
 
@@ -135,19 +141,71 @@ All results are stored in `eval/results.db` (SQLite, gitignored). One row per ga
 
 ### Lichess bot (deploy)
 
-Configs and a thin `homemade.py` shim live under `bot/`. The [lichess-bot](https://github.com/lichess-bot-devs/lichess-bot) repo stays elsewhere (e.g. `~/Projects/lichess-bot`); `deploy_bot.py` copies `bot/templates/homemade_shim.py` → `lichess-bot/homemade.py` and runs `lichess-bot.py --config …` with `PATZER_ROOT` set.
+Configs and a thin `homemade.py` shim live under `bot/`. The [lichess-bot](https://github.com/lichess-bot-devs/lichess-bot) repo stays elsewhere (e.g. `~/Projects/lichess-bot`); `deploy_bot.py` symlinks `bot/templates/homemade_shim.py` → `lichess-bot/homemade.py` and runs `lichess-bot.py --config …` with `PATZER_ROOT` set.
+
+**One-time setup:**
 
 ```bash
-# From Patzer repo root (use lichess-bot’s venv if Patzer’s venv lacks chess/berserk)
-LICHESS_BOT_TOKEN=... python bot/deploy_bot.py run v1
-LICHESS_BOT_TOKEN=... python bot/deploy_bot.py run v2
+# 1. Clone lichess-bot and install its dependencies
+git clone https://github.com/lichess-bot-devs/lichess-bot ~/Projects/lichess-bot
+cd ~/Projects/lichess-bot && python -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# 2. Install the shim (run from Patzer repo root)
+python bot/deploy_bot.py install-shim
 ```
 
-See `bot/README.md`. Per-bot secrets: `LICHESS_BOT_TOKEN` env or `bot/configs/*.local.yml` (gitignored).
+**Run or manage bots:**
 
-### Lichess dashboard (bot game history)
+```bash
+# Start a bot
+python bot/deploy_bot.py run v2
 
-`python dashboard/run.py` — Flask API + `dashboard/lichess_games.db` (**not** `eval/results.db`). Tokens: `PATZER_V1_TOKEN` … `PATZER_V4_TOKEN`. Optional `PATZER_VN_USERNAME` for Lichess API export; **v2 defaults to `patzer_v2b`** (the live account name); DB rows still use `bot_version=patzer_v2`.
+# Upgrade an account to a bot account (one-time, irreversible)
+python bot/deploy_bot.py upgrade v2
+
+# Run multiple bots simultaneously in separate terminals
+python bot/deploy_bot.py run v1   # terminal 1
+python bot/deploy_bot.py run v2   # terminal 2
+```
+
+Per-bot secrets: `LICHESS_BOT_TOKEN` env, `PATZER_VN_TOKEN` in `.env`, or `token:` in `bot/configs/patzer_vN.yml` (gitignored). See `bot/README.md` for token lookup order and config options.
+
+### Analysis dashboard
+
+Web-based dashboard (Flask backend + React frontend) for viewing model evaluations and Lichess bot game history.
+
+**Setup:**
+
+```bash
+cd dashboard
+pip install -r requirements.txt
+```
+
+**Run:**
+
+```bash
+# From repo root or dashboard/ dir
+python dashboard/run.py
+```
+
+Runs on `http://localhost:5050` (port configurable via `DASHBOARD_PORT` env var).
+
+**Pages:**
+
+- **Eval Leaderboard**: Unified leaderboard of all evaluation results across models and checkpoints (data from `eval/results.db`)
+- **Lichess Analysis**: Game history and stats for deployed Lichess bots (data from `dashboard/lichess_games.db`, separate from eval results)
+
+**Bot token configuration:**
+
+Dashboard syncs Lichess bot game history via the Lichess API. Add tokens to `.env` at repo root:
+
+```
+PATZER_V1_TOKEN=lip_xxx
+PATZER_V2_TOKEN=lip_yyy
+PATZER_VN_USERNAME=account_name    # optional; v2 defaults to `patzer_v2b`
+```
+
+Tokens are looked up as `PATZER_VN_TOKEN` where N is the version number. Bot game data is stored in `dashboard/lichess_games.db` (separate from training eval results in `eval/results.db`).
 
 ## Architecture
 
@@ -204,7 +262,7 @@ Manages Vast.ai GPU instances via the `vastai` CLI. On new instance creation, bu
 ## Key conventions
 
 - **Run training scripts from `patzer/`**, not the repo root — `configurator.py` and `r2.py` are loaded with relative paths.
-- **Config files** live in `patzer/config/` and are plain Python that reassigns globals. To create a new model version, copy `train_patzer.py` and increment the version.
+- **Config files** live in `patzer/config/` and are versioned (e.g., `train_patzer_v1.py`, `train_patzer_v2.py`, etc.). They are plain Python that reassigns globals. To create a new model version, copy an existing version config and increment the version number.
 - `**device='auto'`** in config files detects cuda → mps → cpu and disables `torch.compile` on non-CUDA devices automatically (see `train.py` lines 83–91).
 - **Data files are gitignored** (`data/`*). All data lives locally or in R2; never commit binary data.
 - **Checkpoint naming**: `ckpt.pt` = latest full checkpoint (optimizer + weights, for resume). `weights_best.pt` = best val-loss weights only (use for eval/play). `weights_iter_XXXXXX.pt` = step snapshots. When resuming, only architecture args (`n_layer`, `n_head`, `n_embd`, `block_size`, `bias`, `vocab_size`) are forced to match; other hyperparams can change.
