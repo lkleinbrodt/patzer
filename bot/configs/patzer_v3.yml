@@ -1,5 +1,5 @@
-# Patzer v2 — use LICHESS_BOT_TOKEN in the environment (recommended) or token below.
-# Override locally: copy to patzer_v2.local.yml (gitignored).
+# Patzer v3 — use LICHESS_BOT_TOKEN in the environment (recommended) or token below.
+# Override locally: copy to patzer_v3.local.yml (gitignored).
 
 token: ""
 url: "https://lichess.org/"

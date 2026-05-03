@@ -46,6 +46,10 @@ Compare two checkpoints head-to-head:
         checkpoints/patzer_v1/weights_best.pt \\
         --games 20 --device mps
 
+Gauntlet: one challenger plays each selected leaderboard opponent in turn (opponents do not play each other):
+
+    python eval/evaluate.py gauntlet patzer_v4@best --games 50 --device mps
+
 Round-robin across multiple checkpoints (all pairs):
 
     python eval/evaluate.py head2head \\
@@ -84,6 +88,9 @@ Common flags
   --games         number of games to play
   --stockfish     path to stockfish binary (default: /opt/homebrew/bin/stockfish)
   --db            path to results database (default: eval/results.db)
+  --visualize     (stockfish, head2head, gauntlet, rr-*) split window: scrollable log + metrics
+                  on the left (mirrors eval output), live board on the right; one refresh per
+                  half-move and after each log line; closing the window aborts
 """
 
 import argparse
@@ -93,9 +100,10 @@ import random
 import re
 import sys
 import time
+from collections import Counter, defaultdict
+from collections.abc import Callable
 from itertools import combinations
 from pathlib import Path
-from collections import Counter, defaultdict
 
 import chess
 
@@ -180,13 +188,99 @@ def _plain_col(s: str, width: int, align: str = "<") -> str:
     return s.ljust(width)
 
 
-def _print_rr_banner(n_players: int, n_pairs: int, total_games: int) -> None:
+def _parse_rank_list(raw: str, n_max: int) -> list[int]:
+    """Parse rank selections like '1 2 3', '1-5', '1,3,7-10'. Empty input → []."""
+    raw = raw.strip()
+    if not raw:
+        return []
+    raw = raw.replace(",", " ")
+    toks = [t for t in raw.split() if t]
+    out: list[int] = []
+    for t in toks:
+        if "-" in t:
+            a, b = t.split("-", 1)
+            try:
+                lo = int(a)
+                hi = int(b)
+            except ValueError:
+                continue
+            if lo > hi:
+                lo, hi = hi, lo
+            for x in range(lo, hi + 1):
+                if 1 <= x <= n_max:
+                    out.append(x)
+        else:
+            try:
+                x = int(t)
+            except ValueError:
+                continue
+            if 1 <= x <= n_max:
+                out.append(x)
+    seen: set[int] = set()
+    dedup: list[int] = []
+    for x in out:
+        if x not in seen:
+            dedup.append(x)
+            seen.add(x)
+    return dedup
+
+
+def _print_patzer_candidate_table(title_inner: str, top: list) -> None:
+    """Print a numbered Patzer-only candidate table (PlayerRating rows)."""
+    w = max(56, len(title_inner))
+    print()
+    print(_cyan(_bold("  ╔" + "═" * w + "╗")))
+    print(_cyan(_bold(f"  ║{title_inner:<{w}}║")))
+    print(_cyan(_bold("  ╚" + "═" * w + "╝")))
+    print()
+
+    nt = len(top)
+    rk_w = max(2, len(str(nt)))
+    games_w = max(5, *(len(str(r.games)) for r in top))
+    wld_w = max(5, *(len(f"{r.wins}-{r.losses}-{r.draws}") for r in top))
+    plain_hdr = (
+        f"  {_plain_col('#', rk_w, '>')}  {_plain_col('Player', 28)}  "
+        f"{_plain_col('Elo', 5, '>')}  {_plain_col('±', 4, '>')}  "
+        f"{_plain_col('Games', games_w, '>')}  {_plain_col('W-L-D', wld_w)}"
+    )
+    rule_w = max(0, len(plain_hdr) - 2)
+    print(_dim("  " + "─" * rule_w))
+    print(_dim(plain_hdr))
+    print(_dim("  " + "─" * rule_w))
+    for rank, r in enumerate(top, 1):
+        se = f"{r.stderr:.0f}" if not math.isnan(r.stderr) else "—"
+        wld = _plain_col(f"{r.wins}-{r.losses}-{r.draws}", wld_w)
+        elo_str = _plain_col(f"{r.elo:5.0f}", 5, ">")
+        rk_s = _plain_col(str(rank), rk_w, ">")
+        name_s = _plain_col(r.name, 28)
+        se_s = _plain_col(se, 4, ">")
+        g_s = _plain_col(str(r.games), games_w, ">")
+
+        if rank <= 3:
+            row = (
+                f"  {rk_s}  {_bold(name_s)}  {_bold(elo_str)}  "
+                f"{_dim(se_s)}  {g_s}  {_dim(wld)}"
+            )
+        else:
+            row = f"  {rk_s}  {name_s}  {elo_str}  {_dim(se_s)}  {g_s}  {_dim(wld)}"
+        print(row)
+    print(_dim("  " + "─" * rule_w))
+
+
+def _print_rr_banner(
+    n_players: int, n_pairs: int, total_games: int, viz=None,
+) -> None:
     inner = f"  Round Robin  ·  {n_players} players  ·  {n_pairs} matches  ·  {total_games:,} games  "
     w = max(58, len(inner))
     print()
     print(_cyan(_bold("  ╔" + "═" * w + "╗")))
     print(_cyan(_bold(f"  ║{inner:<{w}}║")))
     print(_cyan(_bold("  ╚" + "═" * w + "╝")))
+    if viz is not None:
+        viz.log(
+            f"Round Robin · {n_players} players · {n_pairs} matches · {total_games:,} games",
+            "accent",
+        )
 
 
 def _print_match_header(
@@ -198,26 +292,35 @@ def _print_match_header(
     games_done: int,
     total_games: int,
     t_start: float,
+    viz=None,
 ) -> None:
     elapsed = time.time() - t_start
     if games_done > 0:
         rate = games_done / elapsed
         remaining = total_games - games_done
         eta_str = f"  {_eta(remaining / rate)}"
+        eta_plain = f" · ETA {_eta(remaining / rate)}"
     else:
         eta_str = ""
+        eta_plain = ""
 
     match_label = _bold(_cyan(f"Match {pair_idx + 1}/{n_pairs}"))
     right = _dim(f"{games_done}/{total_games} games · {_dur(elapsed)} elapsed{eta_str}")
     # Build a divider that fills ~78 chars
     label_plain = f"Match {pair_idx + 1}/{n_pairs}"
-    right_plain = f"{games_done}/{total_games} games · {_dur(elapsed)} elapsed{eta_str.replace(_eta(0), '')}"
     fill = max(4, 76 - len(label_plain) - len(f"{games_done}/{total_games} games · {_dur(elapsed)} elapsed"))
     divider = _dim("─" * fill)
 
     print()
     print(f"  {match_label}  {divider}  {right}")
     print(f"  {_bold(na)}  {_dim('vs')}  {_bold(nb)}  " + _dim(f"({games_per_pair} games)"))
+    if viz is not None:
+        viz.log(
+            f"Match {pair_idx + 1}/{n_pairs} · {games_done}/{total_games} games · "
+            f"{_dur(elapsed)} elapsed{eta_plain}",
+            "accent",
+        )
+        viz.log(f"{na}  vs  {nb}  ({games_per_pair} games)", "normal")
 
 
 def _print_game_line(
@@ -233,6 +336,7 @@ def _print_game_line(
     score_a: float,
     a_is_white: bool,
     game_secs: float,
+    viz=None,
 ) -> None:
     """Print one game line. na/nb are always model-A / model-B (stable order).
     Colors (W/B) reflect actual board assignment for this game."""
@@ -255,10 +359,21 @@ def _print_game_line(
         f"  {result_str}  {term_str}"
         f"  {wld_str}  {score_str}  {time_str}"
     )
+    if viz is not None:
+        played_v = wa + la + da
+        pct_v = (wa + 0.5 * da) / played_v * 100 if played_v else 0.0
+        ca_p = "W" if a_is_white else "B"
+        cb_p = "B" if a_is_white else "W"
+        viz.log(
+            f"{game_idx + 1}/{games_per_pair}  {ca_p} {na[:26]:<26}  {cb_p} {nb[:26]:<26}  "
+            f"{result}  {(termination or '')[:18]}  "
+            f"{wa}-{la}-{da}  {pct_v:5.1f}%  {game_secs:.1f}s",
+            "normal",
+        )
 
 
 def _print_match_footer(
-    na: str, nb: str, wa: int, la: int, da: int, match_secs: float
+    na: str, nb: str, wa: int, la: int, da: int, match_secs: float, viz=None,
 ) -> None:
     played = wa + la + da
     pct = (wa + 0.5 * da) / played * 100 if played else 0.0
@@ -277,6 +392,16 @@ def _print_match_footer(
         f"{_score_colored(pct)}  ·  {verdict}  "
         + _dim(f"·  avg {avg:.1f}s/game")
     )
+    if viz is not None:
+        viz.log("—" * 42, "dim")
+        vplain = (
+            f"{na} wins the match" if wa > la else f"{nb} wins the match" if la > wa else "match drawn"
+        )
+        tone = "good" if wa != la else "warn"
+        viz.log(
+            f"{na}  W-L-D {wa}-{la}-{da}  ·  {pct:.1f}%  ·  {vplain}  ·  avg {avg:.1f}s/game",
+            tone,
+        )
 
 
 def _print_standings(
@@ -285,6 +410,7 @@ def _print_standings(
     t_start: float,
     db_path: Path,
     n_show: int = 15,
+    viz=None,
 ) -> None:
     """Print current Elo standings computed from all games stored so far."""
     games = query_games(db_path=db_path)
@@ -336,6 +462,16 @@ def _print_standings(
             row = f"  {rk_s}  {name_s}  {elo_str}  {_dim(se_s)}  {g_s}  {_dim(wld)}"
         print(row)
     print()
+    if viz is not None:
+        viz.log(f"Standings after {pair_idx}/{n_pairs} matches · {_dur(time.time() - t_start)} elapsed", "accent")
+        hdr = f"{'#':>3}  {'Player':<28}  {'Elo':>5}  {'±':>4}  {'Games':>5}  W-L-D"
+        viz.log(hdr, "dim")
+        for rank, r in enumerate(shown, 1):
+            se = f"{r.stderr:.0f}" if r.stderr and not math.isnan(r.stderr) else "—"
+            wldp = f"{r.wins}-{r.losses}-{r.draws}"
+            line = f"{rank:>3}  {r.name:<28}  {r.elo:5.0f}  {se:>4}  {r.games:5}  {wldp}"
+            tnn = "good" if rank == 1 else "accent" if rank <= 3 else "normal"
+            viz.log(line, tnn)
 
 
 def _print_sf_banner(
@@ -348,6 +484,7 @@ def _print_sf_banner(
     *,
     run_idx: int | None = None,
     n_runs: int | None = None,
+    viz=None,
 ) -> None:
     prefix = ""
     if n_runs is not None and n_runs > 1 and run_idx is not None:
@@ -368,6 +505,20 @@ def _print_sf_banner(
         )
     )
     print()
+    if viz is not None:
+        pfx = ""
+        if n_runs is not None and n_runs > 1 and run_idx is not None:
+            pfx = f"Run {run_idx}/{n_runs} · "
+        viz.log(
+            f"{pfx}Stockfish eval · {pname} · ≤{max_games} games · "
+            f"stop σ≤{stop_sigma:g} · prior {prior_elo:.0f}±{prior_sigma:.0f} (step {elo_step})",
+            "accent",
+        )
+        viz.log(
+            "Adaptive UCI_Elo: first game uses minimum rated strength; "
+            "later games target the posterior mean.",
+            "dim",
+        )
 
 
 def _print_sf_game_line(
@@ -387,6 +538,7 @@ def _print_sf_game_line(
     patzer_is_white: bool,
     game_secs: float,
     eta_sec: float | None,
+    viz=None,
 ) -> None:
     """One finished game vs Stockfish (compact row, ANSI-safe widths)."""
     idx_w = max(5, len(str(max_games)) * 2 + 1)
@@ -410,10 +562,24 @@ def _print_sf_game_line(
         f"  {idx_s}  {sf_tag}  {ca} {pn}  {_dim('v')} {opp}"
         f"  {res}  {term}  {wld}  {pct_s}  {_dim('est')} {est_cell}  {time_str}{eta_part}"
     )
+    if viz is not None:
+        short = {"1-0": "1-0", "0-1": "0-1", "1/2-1/2": "½-½"}.get(result, result)
+        eta_p = f"  ETA {_eta(eta_sec)}" if eta_sec is not None else ""
+        ca_p = "W" if patzer_is_white else "B"
+        viz.log(
+            f"{game_idx}/{max_games}  SF {target_elo}  {ca_p} {pname[:22]:<22}  v  {stockfish_name(target_elo)[:16]:<16}  "
+            f"{short}  {(termination or '')[:14]:<14}  {total_w}-{total_l}-{total_d}  "
+            f"{pct:5.1f}%  est {mu_est:.0f}±{sigma_est:.0f}  {game_secs:.1f}s{eta_p}",
+            "normal",
+        )
 
 
 def _print_sf_stop_confidence(
-    sigma: float, stop_sigma: float, n_games: int, elapsed: float
+    sigma: float,
+    stop_sigma: float,
+    n_games: int,
+    elapsed: float,
+    viz=None,
 ) -> None:
     print(_dim("  " + "─" * 72))
     print(
@@ -421,9 +587,22 @@ def _print_sf_stop_confidence(
         f"{_dim('≤')} {_bold(f'{stop_sigma:g}')}  "
         f"{_dim(f'·  {n_games} games · {_dur(elapsed)}')}"
     )
+    if viz is not None:
+        viz.log(
+            f"Stopping · posterior σ = {sigma:.1f} ≤ {stop_sigma:g} · "
+            f"{n_games} games · {_dur(elapsed)}",
+            "good",
+        )
 
 
-def _print_sf_summary(pname: str, mu: float, sigma: float, n_games: int, elapsed: float) -> None:
+def _print_sf_summary(
+    pname: str,
+    mu: float,
+    sigma: float,
+    n_games: int,
+    elapsed: float,
+    viz=None,
+) -> None:
     print(_dim("  " + "─" * 72))
     print(
         f"  {_bold('Result')}  {_bold(pname)}  {_dim('→')}  "
@@ -431,6 +610,12 @@ def _print_sf_summary(pname: str, mu: float, sigma: float, n_games: int, elapsed
         f"{_dim(f'({n_games} games · {_dur(elapsed)})')}"
     )
     print()
+    if viz is not None:
+        viz.log(
+            f"Result  {pname}  →  estimated Elo {mu:.0f} ± {sigma:.0f}  "
+            f"({n_games} games · {_dur(elapsed)})",
+            "accent",
+        )
 
 
 def _resolve_checkpoint(arg: str) -> Path:
@@ -665,10 +850,13 @@ def play_game(
     black,
     opening_moves: list[str] | None = None,
     max_moves: int = 300,
-) -> tuple[str, str]:
+    on_ply: Callable[[chess.Board, chess.Move], None] | None = None,
+    return_move_history: bool = False,
+) -> tuple[str, str] | tuple[str, str, list[str]]:
     """
     Play one game from the starting position (optionally with opening_moves
-    pre-applied). Returns (result, termination).
+    pre-applied). Returns (result, termination), or (result, termination, move_history)
+    when return_move_history is True (UCI move strings in order played).
 
     result: '1-0' | '0-1' | '1/2-1/2'
     termination: 'checkmate' | 'stalemate' | 'fifty_moves' | 'threefold_repetition' |
@@ -689,6 +877,8 @@ def play_game(
             if m in board.legal_moves:
                 board.push(m)
                 move_history.append(uci)
+                if on_ply is not None:
+                    on_ply(board, m)
             else:
                 # Shouldn't happen with a valid book — bail and start from wherever we got
                 print(f"  [warn] opening move {uci} illegal in position — truncating", file=sys.stderr)
@@ -709,16 +899,24 @@ def play_game(
 
         board.push(move)
         move_history.append(move.uci())
+        if on_ply is not None:
+            on_ply(board, move)
 
     outcome = board.outcome(claim_draw=True)
     if outcome is None:
-        return "1/2-1/2", "move_limit"
-    termination = outcome.termination.name.lower()
-    if outcome.winner is chess.WHITE:
-        return "1-0", termination
-    if outcome.winner is chess.BLACK:
-        return "0-1", termination
-    return "1/2-1/2", termination
+        result, termination = "1/2-1/2", "move_limit"
+    else:
+        termination = outcome.termination.name.lower()
+        if outcome.winner is chess.WHITE:
+            result = "1-0"
+        elif outcome.winner is chess.BLACK:
+            result = "0-1"
+        else:
+            result = "1/2-1/2"
+
+    if return_move_history:
+        return result, termination, move_history
+    return result, termination
 
 
 def _score_from_result(result: str, player_is_white: bool) -> float:
@@ -818,6 +1016,11 @@ def _stockfish_eval_one(
     opening_book = _load_opening_book()
     db_path = Path(args.db)
     t_start = time.time()
+    viz = None
+    if getattr(args, "visualize", False):
+        from eval.eval_viz import EvalBoardViewer
+
+        viz = EvalBoardViewer()
 
     def _round(x: float) -> int:
         return int(round(x / args.elo_step) * args.elo_step)
@@ -831,6 +1034,7 @@ def _stockfish_eval_one(
         args.elo_step,
         run_idx=run_idx,
         n_runs=n_runs,
+        viz=viz,
     )
 
     try:
@@ -838,7 +1042,11 @@ def _stockfish_eval_one(
             mu, sigma = _posterior_mean_sigma(xs, p)
             if sigma <= args.stop_sigma and games_played > 0:
                 _print_sf_stop_confidence(
-                    sigma, args.stop_sigma, games_played, time.time() - t_start
+                    sigma,
+                    args.stop_sigma,
+                    games_played,
+                    time.time() - t_start,
+                    viz=viz,
                 )
                 break
 
@@ -856,8 +1064,15 @@ def _stockfish_eval_one(
             black = sf if patzer_is_white else patzer
 
             opening_moves = rng.choice(opening_book)
+            if viz is not None:
+                viz.set_players(white.name, black.name)
             t_game = time.time()
-            result, termination = play_game(white, black, opening_moves=opening_moves)
+            result, termination = play_game(
+                white,
+                black,
+                opening_moves=opening_moves,
+                on_ply=viz.ply if viz is not None else None,
+            )
             game_secs = time.time() - t_game
             score = _score_from_result(result, patzer_is_white)
 
@@ -895,6 +1110,7 @@ def _stockfish_eval_one(
                 patzer_is_white=patzer_is_white,
                 game_secs=game_secs,
                 eta_sec=eta_sec,
+                viz=viz,
             )
 
             insert_game(
@@ -917,7 +1133,9 @@ def _stockfish_eval_one(
             sf.close()
 
     mu, sigma = _posterior_mean_sigma(xs, p)
-    _print_sf_summary(pname, mu, sigma, games_played, time.time() - t_start)
+    _print_sf_summary(pname, mu, sigma, games_played, time.time() - t_start, viz=viz)
+    if viz is not None:
+        viz.close()
 
 
 def cmd_stockfish(args: argparse.Namespace) -> None:
@@ -993,64 +1211,86 @@ def cmd_head2head(args: argparse.Namespace) -> None:
     total_games = n_pairs * args.games
     games_done = 0
     t_start = time.time()
+    viz = None
+    if getattr(args, "visualize", False):
+        from eval.eval_viz import EvalBoardViewer
 
-    if n_pairs > 1:
-        _print_rr_banner(len(names), n_pairs, total_games)
+        viz = EvalBoardViewer()
 
-    for pair_idx, (i, j) in enumerate(pairs):
-        a, b = models[i], models[j]
-        na, nb = names[i], names[j]
-        ra, rb = str(checkpoints[i]), str(checkpoints[j])
+    try:
+        if n_pairs > 1:
+            _print_rr_banner(len(names), n_pairs, total_games, viz=viz)
 
-        _print_match_header(pair_idx, n_pairs, na, nb, args.games, games_done, total_games, t_start)
+        for pair_idx, (i, j) in enumerate(pairs):
+            a, b = models[i], models[j]
+            na, nb = names[i], names[j]
+            ra, rb = str(checkpoints[i]), str(checkpoints[j])
 
-        w = l = d = 0
-        t_match_start = time.time()
-
-        for game_idx in range(args.games):
-            opening_moves = rng.choice(opening_book)
-            a_is_white = game_idx % 2 == 0
-            white, black = (a, b) if a_is_white else (b, a)
-            wname, bname = (na, nb) if a_is_white else (nb, na)
-            wrel, brel = (ra, rb) if a_is_white else (rb, ra)
-            witer = (a if a_is_white else b).iter_num
-            biter = (b if a_is_white else a).iter_num
-
-            t_game = time.time()
-            result, termination = play_game(white, black, opening_moves=opening_moves)
-            game_secs = time.time() - t_game
-
-            score_a = _score_from_result(result, a_is_white)
-            if score_a == 1.0:
-                w += 1
-            elif score_a == 0.0:
-                l += 1
-            else:
-                d += 1
-
-            games_done += 1
-            _print_game_line(game_idx, args.games, na, nb, result, termination,
-                             w, l, d, score_a, a_is_white, game_secs)
-
-            insert_game(
-                white=wname, black=bname, result=result,
-                termination=termination,
-                white_checkpoint=wrel, black_checkpoint=brel,
-                white_iter=witer, black_iter=biter,
-                opening=" ".join(opening_moves),
-                temperature=args.temperature, top_k=args.top_k,
-                conditioning=args.conditioning,
-                db_path=db_path,
+            _print_match_header(
+                pair_idx, n_pairs, na, nb, args.games, games_done, total_games, t_start,
+                viz=viz,
             )
 
-        _print_match_footer(na, nb, w, l, d, time.time() - t_match_start)
-        if n_pairs > 1:
-            _print_standings(pair_idx + 1, n_pairs, t_start, db_path)
+            w = l = d = 0
+            t_match_start = time.time()
 
-    # Final summary for single head2head (no standings shown mid-run)
-    if n_pairs == 1:
-        elapsed = time.time() - t_start
-        print(_dim(f"\n  Done in {_dur(elapsed)}"))
+            for game_idx in range(args.games):
+                opening_moves = rng.choice(opening_book)
+                a_is_white = game_idx % 2 == 0
+                white, black = (a, b) if a_is_white else (b, a)
+                wname, bname = (na, nb) if a_is_white else (nb, na)
+                wrel, brel = (ra, rb) if a_is_white else (rb, ra)
+                witer = (a if a_is_white else b).iter_num
+                biter = (b if a_is_white else a).iter_num
+
+                if viz is not None:
+                    viz.set_players(wname, bname)
+                t_game = time.time()
+                result, termination = play_game(
+                    white,
+                    black,
+                    opening_moves=opening_moves,
+                    on_ply=viz.ply if viz is not None else None,
+                )
+                game_secs = time.time() - t_game
+
+                score_a = _score_from_result(result, a_is_white)
+                if score_a == 1.0:
+                    w += 1
+                elif score_a == 0.0:
+                    l += 1
+                else:
+                    d += 1
+
+                games_done += 1
+                _print_game_line(
+                    game_idx, args.games, na, nb, result, termination,
+                    w, l, d, score_a, a_is_white, game_secs,
+                    viz=viz,
+                )
+
+                insert_game(
+                    white=wname, black=bname, result=result,
+                    termination=termination,
+                    white_checkpoint=wrel, black_checkpoint=brel,
+                    white_iter=witer, black_iter=biter,
+                    opening=" ".join(opening_moves),
+                    temperature=args.temperature, top_k=args.top_k,
+                    conditioning=args.conditioning,
+                    db_path=db_path,
+                )
+
+            _print_match_footer(na, nb, w, l, d, time.time() - t_match_start, viz=viz)
+            if n_pairs > 1:
+                _print_standings(pair_idx + 1, n_pairs, t_start, db_path, viz=viz)
+
+        # Final summary for single head2head (no standings shown mid-run)
+        if n_pairs == 1:
+            elapsed = time.time() - t_start
+            print(_dim(f"\n  Done in {_dur(elapsed)}"))
+    finally:
+        if viz is not None:
+            viz.close()
 
 
 def cmd_rr_prefix(args: argparse.Namespace) -> None:
@@ -1076,6 +1316,7 @@ def cmd_rr_prefix(args: argparse.Namespace) -> None:
         conditioning=args.conditioning,
         seed=args.seed,
         db=args.db,
+        visualize=getattr(args, "visualize", False),
     )
     cmd_head2head(h2h_args)
 
@@ -1215,86 +1456,14 @@ def cmd_rr_leaderboard(args: argparse.Namespace) -> None:
 
     top = patzers[: min(20, len(patzers))]
 
-    # Candidate table header
     title_inner = f"  Leaderboard Candidates  ·  top {len(top)} of {len(patzers)} Patzer players  "
-    w = max(56, len(title_inner))
-    print()
-    print(_cyan(_bold("  ╔" + "═" * w + "╗")))
-    print(_cyan(_bold(f"  ║{title_inner:<{w}}║")))
-    print(_cyan(_bold("  ╚" + "═" * w + "╝")))
-    print()
-
-    nt = len(top)
-    rk_w = max(2, len(str(nt)))
-    games_w = max(5, *(len(str(r.games)) for r in top))
-    wld_w = max(5, *(len(f"{r.wins}-{r.losses}-{r.draws}") for r in top))
-    plain_hdr = (
-        f"  {_plain_col('#', rk_w, '>')}  {_plain_col('Player', 28)}  "
-        f"{_plain_col('Elo', 5, '>')}  {_plain_col('±', 4, '>')}  "
-        f"{_plain_col('Games', games_w, '>')}  {_plain_col('W-L-D', wld_w)}"
-    )
-    rule_w = max(0, len(plain_hdr) - 2)
-    print(_dim("  " + "─" * rule_w))
-    print(_dim(plain_hdr))
-    print(_dim("  " + "─" * rule_w))
-    for rank, r in enumerate(top, 1):
-        se = f"{r.stderr:.0f}" if not math.isnan(r.stderr) else "—"
-        wld = _plain_col(f"{r.wins}-{r.losses}-{r.draws}", wld_w)
-        elo_str = _plain_col(f"{r.elo:5.0f}", 5, ">")
-        rk_s = _plain_col(str(rank), rk_w, ">")
-        name_s = _plain_col(r.name, 28)
-        se_s = _plain_col(se, 4, ">")
-        g_s = _plain_col(str(r.games), games_w, ">")
-        if rank <= 3:
-            row = (
-                f"  {rk_s}  {_bold(name_s)}  {_bold(elo_str)}  "
-                f"{_dim(se_s)}  {g_s}  {_dim(wld)}"
-            )
-        else:
-            row = f"  {rk_s}  {name_s}  {elo_str}  {_dim(se_s)}  {g_s}  {_dim(wld)}"
-        print(row)
-    print(_dim("  " + "─" * rule_w))
+    _print_patzer_candidate_table(title_inner, top)
 
     if args.no_prompt:
         players = [r.name for r in top]
     else:
         print(f"\n  {_bold('Select models by rank')} to run a round-robin tournament.")
         print(_dim("  Examples: '1 2 3', '1-5', '1,3,7-10' — Enter = default top 10"))
-
-        def _parse_rank_list(raw: str, n_max: int) -> list[int]:
-            raw = raw.strip()
-            if not raw:
-                return []
-            raw = raw.replace(",", " ")
-            toks = [t for t in raw.split() if t]
-            out: list[int] = []
-            for t in toks:
-                if "-" in t:
-                    a, b = t.split("-", 1)
-                    try:
-                        lo = int(a); hi = int(b)
-                    except ValueError:
-                        continue
-                    if lo > hi:
-                        lo, hi = hi, lo
-                    for x in range(lo, hi + 1):
-                        if 1 <= x <= n_max:
-                            out.append(x)
-                else:
-                    try:
-                        x = int(t)
-                    except ValueError:
-                        continue
-                    if 1 <= x <= n_max:
-                        out.append(x)
-            # Deduplicate while preserving order
-            seen = set()
-            dedup: list[int] = []
-            for x in out:
-                if x not in seen:
-                    dedup.append(x)
-                    seen.add(x)
-            return dedup
 
         try:
             raw = input("Ranks to include (default: 1-10): ")
@@ -1381,8 +1550,106 @@ def cmd_rr_leaderboard(args: argparse.Namespace) -> None:
         conditioning=args.conditioning,
         seed=args.seed,
         db=args.db,
+        visualize=getattr(args, "visualize", False),
     )
     cmd_head2head(h2h_args)
+
+
+def cmd_gauntlet(args: argparse.Namespace) -> None:
+    """
+    One challenger plays each selected leaderboard opponent in sequence; opponents never play each other.
+    """
+    challenger_path = _resolve_checkpoint(args.challenger)
+    _sync_checkpoint(challenger_path)
+
+    ch = Patzer(
+        challenger_path,
+        device=args.device,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        conditioning=args.conditioning,
+    )
+    challenger_name = player_name(challenger_path, ch.iter_num)
+    del ch
+
+    games = query_games()
+    if not games:
+        print("No games in database.")
+        return
+
+    ratings_all = compute_ratings(games)
+    ratings_all = [r for r in ratings_all if r.games >= args.min_games]
+    patzers = [r for r in ratings_all if r.name.startswith("patzer_v")]
+    if not patzers:
+        print(f"No Patzer players with ≥{args.min_games} games.")
+        return
+
+    others = [r for r in patzers if r.name != challenger_name][:20]
+    if not others:
+        print("[gauntlet] No opponents available (leaderboard has only the challenger).")
+        return
+
+    ckpt_map = _checkpoint_map_from_games(games)
+
+    print(f"\n  {_bold('Challenger:')}  {_bold(challenger_name)}  {_dim(str(challenger_path))}")
+    title_inner = f"  Gauntlet opponents  ·  top {len(others)} Patzers (excl. challenger)  "
+    _print_patzer_candidate_table(title_inner, others)
+
+    if args.no_prompt:
+        ranks = list(range(1, min(10, len(others)) + 1))
+    else:
+        print(f"\n  {_bold('Select opponent ranks')} for the gauntlet.")
+        print(_dim("  Examples: '1 2 3', '1-5', '1,3,7-10' — Enter = ranks 1–10"))
+        try:
+            raw = input("Opponent ranks (default: 1-10): ")
+        except EOFError:
+            return
+        ranks = _parse_rank_list(raw, len(others))
+        if not ranks:
+            ranks = list(range(1, min(10, len(others)) + 1))
+
+    opponent_names = [others[i - 1].name for i in ranks]
+    if args.limit is not None:
+        opponent_names = opponent_names[: max(0, int(args.limit))]
+
+    if not opponent_names:
+        print("[gauntlet] No opponents selected; exiting.")
+        return
+
+    n_match = len(opponent_names)
+    total_games = n_match * args.games
+    inner = f"  Gauntlet  ·  {challenger_name}  vs  {n_match} opponent(s)  ·  {total_games} games  "
+    w = max(58, len(inner))
+    print()
+    print(_cyan(_bold("  ╔" + "═" * w + "╗")))
+    print(_cyan(_bold(f"  ║{inner:<{w}}║")))
+    print(_cyan(_bold("  ╚" + "═" * w + "╝")))
+
+    for idx, opp_name in enumerate(opponent_names):
+        opp_ckpt_s = ckpt_map.get(opp_name)
+        if not opp_ckpt_s:
+            print(_yellow(f"\n  ⚠  no checkpoint in DB for {opp_name}, skipping."))
+            continue
+        opp_path = Path(opp_ckpt_s)
+        if opp_path.resolve() == challenger_path.resolve():
+            print(_dim(f"\n  (skip {opp_name}: same file as challenger)"))
+            continue
+        _sync_checkpoint(opp_path)
+
+        seed = None if args.seed is None else args.seed + idx * 1_000_003
+        h2h_args = argparse.Namespace(
+            checkpoints=[str(challenger_path), str(opp_path)],
+            games=args.games,
+            round_robin=False,
+            device=args.device,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            conditioning=args.conditioning,
+            seed=seed,
+            db=args.db,
+            visualize=getattr(args, "visualize", False),
+        )
+        cmd_head2head(h2h_args)
 
 
 def cmd_history(args: argparse.Namespace) -> None:
@@ -1496,6 +1763,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sf.add_argument("--seed", type=int, default=None,
                        help="RNG seed for opening selection (default: random)")
     p_sf.add_argument("--db", default=str(DB_PATH), help="Database path")
+    p_sf.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Open a pygame board window; one refresh per half-move (close to abort)",
+    )
 
     # --- head2head ---
     p_h2h = sub.add_parser("head2head", help="Model vs model")
@@ -1510,6 +1782,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_h2h.add_argument("--seed", type=int, default=None,
                         help="RNG seed for opening selection (default: random)")
     p_h2h.add_argument("--db", default=str(DB_PATH), help="Database path")
+    p_h2h.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Open a pygame board window; one refresh per half-move (close to abort)",
+    )
 
     # --- rr-prefix ---
     p_rr = sub.add_parser(
@@ -1527,6 +1804,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_rr.add_argument("--seed", type=int, default=None,
                        help="RNG seed for opening selection (default: random)")
     p_rr.add_argument("--db", default=str(DB_PATH), help="Database path")
+    p_rr.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Open a pygame board window; one refresh per half-move (close to abort)",
+    )
 
     # --- rr-leaderboard ---
     p_rrlb = sub.add_parser(
@@ -1546,6 +1828,61 @@ def build_parser() -> argparse.ArgumentParser:
                          help="RNG seed for opening selection (default: random)")
     p_rrlb.add_argument("--db", default=str(DB_PATH), help="Database path")
     p_rrlb.add_argument("--no-prompt", action="store_true", help="Use the whole displayed top 20 (Patzer only) without prompting")
+    p_rrlb.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Open a pygame board window; one refresh per half-move (close to abort)",
+    )
+
+    # --- gauntlet ---
+    p_gau = sub.add_parser(
+        "gauntlet",
+        help="Challenger vs each selected leaderboard opponent in turn (no games among opponents)",
+    )
+    p_gau.add_argument(
+        "challenger",
+        help="Challenger checkpoint (path, patzer_vN@K, patzer_vN@best, …)",
+    )
+    p_gau.add_argument(
+        "--games",
+        type=int,
+        default=50,
+        help="Games per challenger–opponent pair (default: 50)",
+    )
+    p_gau.add_argument(
+        "--min-games",
+        type=int,
+        default=5,
+        dest="min_games",
+        help="Only list Patzer players with at least this many games in the DB (default: 5)",
+    )
+    p_gau.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="After rank selection, keep only the first N opponents (optional)",
+    )
+    p_gau.add_argument("--device", default="cpu")
+    p_gau.add_argument("--temperature", type=float, default=0.01)
+    p_gau.add_argument("--top-k", type=int, default=None, dest="top_k")
+    p_gau.add_argument("--conditioning", default="match_color", choices=CONDITIONING_OPTIONS)
+    p_gau.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="RNG seed for openings; each opponent match adds an offset (default: random)",
+    )
+    p_gau.add_argument("--db", default=str(DB_PATH), help="Database path")
+    p_gau.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="Use default opponent ranks 1–10 (no interactive selection)",
+    )
+    p_gau.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Open a pygame board window; one refresh per half-move (close to abort)",
+    )
 
     # --- leaderboard ---
     p_lb = sub.add_parser("leaderboard", help="Unified Elo leaderboard")
@@ -1593,6 +1930,7 @@ def main() -> None:
         "head2head": cmd_head2head,
         "rr-prefix": cmd_rr_prefix,
         "rr-leaderboard": cmd_rr_leaderboard,
+        "gauntlet": cmd_gauntlet,
         "leaderboard": cmd_leaderboard,
         "history": cmd_history,
         "progress": cmd_progress,

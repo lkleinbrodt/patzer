@@ -46,13 +46,15 @@ engine:
       enabled: false
       paths: []
   homemade_options:
-    patzer_checkpoint: "checkpoints/patzer_v/weights_best.pt"
+    patzer_checkpoint: "checkpoints/patzer_v2/weights_best.pt"
     device: "auto"
     temperature: 0
     conditioning: "match_color"
+    min_think_ms: 50
+    think_jitter_ms: 50
 
 challenge:
-  concurrency: 1
+  concurrency: 2
   sort_by: "best"
   preference: "none"
   accept_bot: true
@@ -70,7 +72,6 @@ challenge:
     - blitz
     - rapid
   modes:
-    - casual
     - rated
   bullet_requires_increment: false
   max_simultaneous_games_per_user: 5
@@ -85,7 +86,7 @@ matchmaking:
   allow_matchmaking: true
   allow_during_games: true
   challenge_variant: "standard"
-  challenge_timeout: 1
+  challenge_timeout: 0
   challenge_initial_time:
     - 60
     - 120
@@ -101,7 +102,5 @@ matchmaking:
   include_challenge_block_list: false
 
 greeting:
-  hello: "Hi! I'm Patzer v2 — {me}. Good luck!"
+  hello: "Hi! I'm Patzer v2, I don't know the rules of chess but I've watched a lot of games."
   goodbye: "Good game!"
-  hello_spectators: "Hi! I'm {me}."
-  goodbye_spectators: "Thanks for watching!"
