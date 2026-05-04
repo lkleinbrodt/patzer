@@ -3,6 +3,7 @@
 
 token: ""
 url: "https://lichess.org/"
+quit_after_all_games_finish: true
 
 engine:
   dir: "."
@@ -99,7 +100,7 @@ matchmaking:
   opponent_max_rating: 2000
   rating_preference: "none"
   challenge_mode: "rated"
-  challenge_filter: coarse
+  challenge_filter: fine
   include_challenge_block_list: false
 
 greeting:

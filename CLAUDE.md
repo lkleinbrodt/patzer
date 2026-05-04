@@ -143,6 +143,8 @@ All results are stored in `eval/results.db` (SQLite, gitignored). One row per ga
 
 Configs and a thin `homemade.py` shim live under `bot/`. The [lichess-bot](https://github.com/lichess-bot-devs/lichess-bot) repo stays elsewhere (e.g. `~/Projects/lichess-bot`); `deploy_bot.py` symlinks `bot/templates/homemade_shim.py` → `lichess-bot/homemade.py` and runs `lichess-bot.py --config …` with `PATZER_ROOT` set.
 
+Use **`python bot/cycle_bots.py`** to rotate one bot at a time on a shared machine (defaults: dwell 3600s, cycles every `patzer_*.yml` under `bot/configs/`).
+
 **One-time setup:**
 
 ```bash

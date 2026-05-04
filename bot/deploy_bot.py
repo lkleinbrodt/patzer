@@ -164,7 +164,15 @@ def cmd_upgrade(label: str, lichess_home: Path, dry_run: bool) -> None:
     subprocess.run(argv, env=env, check=True)
 
 
-def cmd_run(label: str, lichess_home: Path, dry_run: bool) -> None:
+def prepare_run(
+    label: str, lichess_home: Path, *, resolve_tokens: bool = True
+) -> tuple[list[str], dict[str, str], Path]:
+    """
+    Build argv, env, and working directory to run lichess-bot for this Patzer label.
+
+    Used by cmd_run and bot/cycle_bots.py (graceful rotation with signals).
+    Set resolve_tokens=False for dry-run (skips reading .env / YAML token).
+    """
     cfg = resolve_config_path(label)
     lichess_py = lichess_home / "lichess-bot.py"
     if not lichess_py.is_file():
@@ -175,18 +183,23 @@ def cmd_run(label: str, lichess_home: Path, dry_run: bool) -> None:
     patzer_root = os.environ.get("PATZER_ROOT", str(repo_root()))
     python = pick_python(lichess_home)
     argv = [python, str(lichess_py), "--config", str(cfg.resolve())]
-    print("cwd:         ", lichess_home)
+    token = resolve_token(label, cfg) if resolve_tokens else ""
+    env = os.environ.copy()
+    env["PATZER_ROOT"] = patzer_root
+    env["LICHESS_BOT_TOKEN"] = token  # lichess-bot reads this to override the YAML token field
+    return argv, env, lichess_home.resolve()
+
+
+def cmd_run(label: str, lichess_home: Path, dry_run: bool) -> None:
+    argv, env, cwd = prepare_run(label, lichess_home, resolve_tokens=not dry_run)
+    patzer_root = env.get("PATZER_ROOT", "")
+    print("cwd:         ", cwd)
     print("exec:        ", " ".join(argv))
     print("PATZER_ROOT: ", patzer_root)
     if dry_run:
         return
 
-    token = resolve_token(label, cfg)
-    env = os.environ.copy()
-    env["PATZER_ROOT"] = patzer_root
-    env["LICHESS_BOT_TOKEN"] = token  # lichess-bot reads this to override the YAML token field
-
-    os.chdir(lichess_home)
+    os.chdir(cwd)
     subprocess.run(argv, env=env, check=True)
 
 

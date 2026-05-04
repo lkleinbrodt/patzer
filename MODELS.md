@@ -4,14 +4,14 @@
 
 ## Unified eval insights (`eval/evaluate.py leaderboard`)
 
-Ratings fit a Bradley–Terry model on every row in `eval/results.db`: Patzer **self-play**, **Patzer vs capped Stockfish**, and cross-checkpoint mixes. Player labels are `patzer_vN@{k}` with `k` = training step in **thousands**. **Stockfish opponents are anchored** at their matchup Elo (hidden from the printed table); Patzer logits are **fitted** on the same graph, so the printed Elo is a **Stockfish-centered scale** — comparable across runs in one DB snapshot, but **not** the same numeric scale as older “internal ladder only” exports. Not Lichess rating. Refresh with `python eval/evaluate.py leaderboard`.
+Ratings fit a Bradley–Terry model on every row in `eval/results.db`: Patzer **self-play**, **Patzer vs capped Stockfish**, and cross-checkpoint mixes. Player labels are `patzer_vN@{k}` with `k` = training step in **thousands**. **Stockfish opponents are anchored** at their matchup Elo (hidden from the printed table); Patzer logits are **fitted** on the same graph, so the printed Elo is a **Stockfish-centered scale** — comparable across runs in one DB snapshot, but **not** the same numeric scale as older “internal ladder only” exports. Not Lichess rating. Refresh with `python eval/evaluate.py leaderboard`. *Local DB snapshot (May 2026): **7268** games total in `results.db`.*
 
 ### Peak strength per model family
 
 
 | Family | Best checkpoint (logged) | Elo ± σ       | Notes                                            |
 | ------ | ------------------------ | ------------- | ------------------------------------------------ |
-| v4     | `patzer_v4@201`          | **1600 ± 11** | #1 on ladder (May 2026 DB); 1124 games           |
+| v4     | `patzer_v4@201`          | **1600 ± 11** | #1 on ladder; 1124 games on this row             |
 | v3     | `patzer_v3@180`          | **1579 ± 10** | Was strongest before v4 evals landed; 1484 games |
 | v2     | `patzer_v2@288`          | **1402 ± 11** | Within noise of `@274` (1389 ± 14)               |
 | v1     | `patzer_v1@40`           | **1196 ± 13** | Only v1 snapshot in DB — no iteration sweep      |
@@ -57,14 +57,15 @@ Across families, v4’s best sits about **~200** above v2’s best and **~400** 
 | batch_size       | 128 (32 × 4 accum)                |
 | max_iters        | 40,000                            |
 | lr               | 1e-3 → 1e-4 (cosine)              |
-| val loss (final) | ~1.84                             |
-| hardware         | Vast.ai (GPU unrecorded)          |
-| step time        | unrecorded                        |
-| throughput       | unrecorded                        |
-| eval time        | unrecorded                        |
+| val loss (best)  | **1.841** at iter **39k** (`metrics.jsonl` from R2) |
+| val loss (final) | **1.843** at iter **40k**                           |
+| hardware         | Vast.ai (GPU unrecorded)                              |
+| step time        | unrecorded                                            |
+| throughput       | unrecorded                                            |
+| eval time        | unrecorded                                            |
 
 
-**Note:** Val loss was still declining at iter 40k — underfit; LR floor 1e-4. Best val was ~30k, not 40k.
+**Note:** Val loss was still improving into the late 30k band; **best val at iter 39k** (final row 40k is slightly worse). Underfit at LR floor 1e-4.
 
 ### Eval
 
@@ -75,7 +76,7 @@ Across families, v4’s best sits about **~200** above v2’s best and **~400** 
 - Play/eval default is temp **0** (greedy) in `eval/engine.py`; saved tournament rows here are **0.1**.
 - 6 layers is too small to learn tactical patterns; mostly learns opening statistics
 - LR min should be 1e-5, not 1e-4 — v1 stopped learning too early
-- More training beyond 30k had diminishing returns given the LR floor
+- More training beyond **39k** (best val) had diminishing returns given the LR floor
 
 ---
 
@@ -106,6 +107,7 @@ Across families, v4’s best sits about **~200** above v2’s best and **~400** 
 | batch_size | 128 (32 × 4 accum)                                       |
 | max_iters  | 150,000 (was still learning; later resumed toward 250k)  |
 | lr         | 1e-3 → 1e-5 (cosine)                                     |
+| val loss (best) | **1.650** at iter **288k** (`metrics.jsonl` from R2) |
 | hardware   | RTX 3060                                                 |
 | step time  | ~155 ms/step                                             |
 | throughput | ~211k tokens/sec                                         |
@@ -145,7 +147,7 @@ See **Unified eval insights** — peak `**patzer_v2@288`** / `**@274`** (~1402 /
 | batch_size      | 128 (32 × 4 accum)                                         |
 | max_iters       | 150,000                                                    |
 | lr              | 6e-4 → 1e-5 (cosine)                                       |
-| val loss (best) | **1.514** at iter 145k                                     |
+| val loss (best) | **1.510** at iter **180k** (`metrics.jsonl` from R2; 145k was **1.514**) |
 | gen gap         | +0.025 (first overfitting signal in any run)               |
 | hardware        | RTX 3060 (phase 1) / RTX 4060 Ti (phase 2)                 |
 | step time       | ~470 ms/step (3060) · ~321 ms/step (4060 Ti)               |
@@ -171,7 +173,7 @@ See **Unified eval insights** — best `**patzer_v3@180`** (**1579 ± 10**); lad
 
 **Checkpoint:** `checkpoints/patzer_v4`
 **Config:** `patzer/config/train_patzer_v4.py` (phase 1) + `train_patzer_v4_cooldown.py` (phase 2; see `PROJECT_LOG.md`)
-**Trained:** May 2026 (phase 1 early stop ~145k → manual cooldown resume → min_lr tail). **Best val at iter 201k**; **stopped manually ~203k** — val flat after best (last `metrics.jsonl` row).
+**Trained:** May 2026 (phase 1 early stop ~145k → manual cooldown resume → min_lr tail). **Best val at iter 201k**; **stopped manually ~203k** — no improvement after 201k (last `metrics.jsonl` row shows val ~1.506 vs best ~1.501).
 
 ### Goal
 
@@ -181,7 +183,7 @@ Also introduces the **WSD (Warmup-Stable-Decay)** LR schedule, replacing cosine.
 
 **Pre-run expectation:** val loss in the 1.40–1.45 range, gen gap closing back toward v2-like levels (~0.005–0.010).
 
-**What happened:** Val **best ~1.501** at iter **201k** (`metrics.jsonl`). Past that, val stayed flat; training was **interrupted ~203k** rather than burning more steps. Only **~0.013 nats** better than v3’s best val (~1.514), not the hoped 1.40s band — LM loss still looks **capacity-limited** at 40M. **Gen gap nearly vanished** at the end (e.g. iter 201k: train ~1.500 vs val ~1.501), unlike v3’s +0.025 — consistent with “more diverse tokens, same capacity.”
+**What happened:** Val **best ~1.501** at iter **201k** (`metrics.jsonl`). Last logged row **203k** has val **~1.506** (no further improvement after 201k; small uptick vs best). Only **~0.009 nats** better than v3’s best val (**~1.510** at 180k), not the hoped 1.40s band — LM loss still looks **capacity-limited** at 40M. **Gen gap nearly vanished** at the end (e.g. iter 201k: train ~1.500 vs val ~1.501), unlike v3’s +0.025 — consistent with “more diverse tokens, same capacity.”
 
 **Play strength (unified ladder, Stockfish-anchored):** `patzer_v4@201` (**1600 ± 11**, 1124 games) ranks **#1** in `eval/results.db` as of the May 2026 snapshot, **~21 Elo** above `patzer_v3@180` (**1579 ± 10**). So the small LM gain + long schedule **did** translate to measurable strength on the eval graph, even though raw val loss did not blow past v3.
 
@@ -270,7 +272,7 @@ Per-iter val-loss progress across phases:
 
 
 - **The cooldown drop is *not* evidence the stable phase was wasted.** This is the expected WSD pattern (DeepSeek, MiniCPM): the stable phase accumulates representation work that the cooldown realizes as lower loss. The "10× faster per iter" ratio is misleading — without the long stable phase, the cooldown has less to extract. Confirmation: ~~30k post-cooldown iters at min_lr produced only -0.006 nats of further drift (1.507 → 1.501), at a rate (~~0.0002 nats/1k iters) that's the same order as the late stable phase before the cooldown. v4 is approaching the basin floor of this architecture+data combo, with diminishing returns at min_lr.
-- **3.3× data → +0.013 nats over v3 (1.514 → 1.501).** Marginal on val loss, but **anchored-ladder Elo** still moved v4’s best **past** v3’s best (~+21 vs `v3@180` in the May 2026 DB). v3's gen-gap signal of "data-bound" has flipped: v4 looks **capacity-bound** on loss, not on “can’t improve play.” v5 should still **scale architecture** for LM headroom; data/schedule alone won’t deliver large val drops.
+- **3.3× data → +0.009 nats over v3 (1.510 → 1.501).** Marginal on val loss, but **anchored-ladder Elo** still moved v4’s best **past** v3’s best (~+21 vs `v3@180` in the local DB). v3's gen-gap signal of "data-bound" has flipped: v4 looks **capacity-bound** on loss, not on “can’t improve play.” v5 should still **scale architecture** for LM headroom; data/schedule alone won’t deliver large val drops.
 - **Manual two-phase workflow caused two restart blips (140k, 160k).** `auto_cooldown=True` (already wired in `train.py`) eliminates this — when early stop would fire, training instead triggers cooldown in-job. Use this for v5.
 - **Cooldown ratio of 30k / 145k ≈ 20% was on the low end of MiniCPM's 10–20% range.** A longer cooldown (e.g. 25–30%, ~40k iters here) might have squeezed out marginally more, but the post-cooldown stagnation suggests the headroom is small (≤0.01 nats). For v5 default to ~25–30%.
 - **Don’t lower the constant LR.** 6e-4 is doing the exploration job correctly. A lower stable LR would slow the stable phase and give the cooldown less accumulated work to realize.

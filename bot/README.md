@@ -40,6 +40,20 @@ python bot/deploy_bot.py run v1   # terminal 1
 python bot/deploy_bot.py run v2   # terminal 2
 ```
 
+## Rotate one bot at a time (shared machine)
+
+`bot/cycle_bots.py` runs each config for a wall-clock period, then sends **one** `SIGINT` so lichess-bot can finish in-progress games (`quit_after_all_games_finish` is enabled in the default YAMLs). It loops forever over the list (default `v1` → `v4`).
+
+```bash
+# Same as `launch.py` / Vast: optional push alerts
+export NTFY_TOPIC=your_topic   # or set in .env
+
+python bot/cycle_bots.py                              # all patzer_*.yml, dwell 3600s
+python bot/cycle_bots.py --dwell 7200 v1 v2           # subset + 2h per bot
+```
+
+Use `--max-wait-after-sigint` if you want an urgent ntfy when shutdown takes longer than expected (default 6 hours). Ctrl-C propagates a SIGINT to the active child so the bot can wind down before you exit the cycler.
+
 ## Add a new version
 
 ```bash

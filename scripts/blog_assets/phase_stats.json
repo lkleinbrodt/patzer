@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-05-04T18:03:56.814405+00:00",
+  "by_version": [
+    {
+      "version": "patzer_v1",
+      "games": 155,
+      "wins": 38,
+      "draws": 30,
+      "losses": 87,
+      "win_rate": 0.245,
+      "draw_rate": 0.194,
+      "loss_rate": 0.561
+    },
+    {
+      "version": "patzer_v2",
+      "games": 105,
+      "wins": 32,
+      "draws": 19,
+      "losses": 54,
+      "win_rate": 0.305,
+      "draw_rate": 0.181,
+      "loss_rate": 0.514
+    },
+    {
+      "version": "patzer_v3",
+      "games": 201,
+      "wins": 126,
+      "draws": 23,
+      "losses": 52,
+      "win_rate": 0.627,
+      "draw_rate": 0.114,
+      "loss_rate": 0.259
+    },
+    {
+      "version": "patzer_v4",
+      "games": 3,
+      "wins": 3,
+      "draws": 0,
+      "losses": 0,
+      "win_rate": 1.0,
+      "draw_rate": 0.0,
+      "loss_rate": 0.0
+    }
+  ]
+}
