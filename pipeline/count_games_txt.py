@@ -12,6 +12,9 @@ Examples (from repo root):
   python pipeline/count_games_txt.py --estimate
   python pipeline/count_games_txt.py --exact
   python pipeline/count_games_txt.py --input data/lichess_games/games_2014-*.txt
+
+  # How many games have both players >= 2000? (reads every line; ignores --estimate/--exact)
+  python pipeline/count_games_txt.py --min-elo 2000
 """
 
 from __future__ import annotations
@@ -46,6 +49,17 @@ def parse_args():
         help="Count every newline via a full-file read.",
     )
     p.set_defaults(estimate=False, exact=False)
+    p.add_argument(
+        "--min-elo",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Full scan: count lines where both ratings are >= N (matches prepare.py / "
+            "filter_games.py). Reads every line; cannot be combined with byte-based "
+            "--estimate."
+        ),
+    )
     return p.parse_args()
 
 
@@ -112,14 +126,76 @@ def count_newlines(path: Path, chunk: int = 8 * 1024 * 1024) -> int:
             n += b.count(b"\n")
 
 
+def scan_min_elo(paths: list[Path], min_elo: int) -> None:
+    """Stream all files; count games passing the same ELO rule as prepare.py --min-elo."""
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from pipeline.prepare import parse_game_line
+
+    total_lines = 0
+    parseable = 0
+    pass_elo = 0
+    rows: list[tuple[str, int, int, int, float]] = []
+    t0 = time.time()
+
+    for p in sorted(paths, key=lambda q: q.name):
+        fl_total = 0
+        fl_parse = 0
+        fl_pass = 0
+        try:
+            mb = p.stat().st_size / (1024 * 1024)
+        except OSError:
+            mb = 0.0
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                total_lines += 1
+                fl_total += 1
+                if parse_game_line(line, min_elo=None) is None:
+                    continue
+                parseable += 1
+                fl_parse += 1
+                if parse_game_line(line, min_elo=min_elo) is not None:
+                    pass_elo += 1
+                    fl_pass += 1
+        rows.append((p.name, fl_total, fl_parse, fl_pass, mb))
+
+    dt = time.time() - t0
+    rejected = parseable - pass_elo
+
+    print(f"Min ELO: both players >= {min_elo} (same rule as pipeline/prepare.py --min-elo)")
+    print()
+    w = max(len(r[0]) for r in rows) if rows else 10
+    print(f"  {'file':{w}s}  {'lines':>12}  {'parseable':>12}  {'pass ELO':>12}  MiB")
+    for name, lt, pr, ps, mb in rows:
+        print(f"  {name:{w}s}  {lt:>12,}  {pr:>12,}  {ps:>12,}  {mb:>5.1f}")
+    print()
+    print(f"Total lines in files:     {total_lines:,}")
+    print(f"Parseable game lines:     {parseable:,}  (valid result + integer ELOs + moves)")
+    print(f"Games passing min-elo:    {pass_elo:,}  ({100.0 * pass_elo / max(total_lines, 1):.2f}% of all lines)")
+    print(f"Parseable but below ELO:  {rejected:,}  ({100.0 * rejected / max(parseable, 1):.2f}% of parseable)")
+    print(f"Read time: {dt:.1f}s ({total_lines / max(dt, 1e-6) / 1e6:.2f}M lines/s)")
+
+
 def main() -> None:
     args = parse_args()
-    use_estimate = args.estimate or not args.exact
     paths = sorted(resolve_files(list(args.input)), key=lambda q: q.name)
 
     if not paths:
         print("No input files matched. Check --input globs.", file=sys.stderr)
         sys.exit(1)
+
+    if args.min_elo is not None:
+        if args.estimate or args.exact:
+            print(
+                "Note: with --min-elo, line counts use a full parse scan "
+                "(--estimate / --exact ignored).",
+                file=sys.stderr,
+            )
+        scan_min_elo(paths, args.min_elo)
+        return
+
+    use_estimate = args.estimate or not args.exact
 
     if use_estimate:
         rows, est_total, avg_bpl = estimate_totals(paths)

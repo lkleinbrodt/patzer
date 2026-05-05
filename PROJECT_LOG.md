@@ -1,5 +1,7 @@
 I want to write one (or many) blog posts about this project. So we should keep a running log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-05:** **High-ELO prepared splits — `prepare.py` + `count_games_txt.py`.** **`pipeline/prepare.py`** accepts **`--min-elo N`** (both players **≥ N**, same as **`filter_games.py`**). **`pipeline/count_games_txt.py --min-elo N`** does a full-file scan and prints per-file and totals: parseable lines vs games passing the threshold. **`meta.json`** records **`min_elo_prepare`**.
+
 - **2026-05-05:** **`launch.py` Vast search + remote CUDA preflight** — default query adds **`cuda_vers>=12.4`** (override with **`--min-cuda-vers 0`** to disable). Offer table includes a **CUDA** column (`cuda_max_good` / `cuda_vers`). Bootstrap script runs a **`torch.cuda.is_available()`** check in **`patzer/`** before R2 / `train.py` (exit **3** if no GPU).
 
 - **2026-05-05:** **`launch.py` config preflight** — before `--instance` or renting, **`validate_train_config()`** checks `patzer/config/{name}.py` exists under the repo, compiles, and `exec`s with normal builtins (typos / syntax errors fail locally with **exit 2**). **`--list` / `--status`** unchanged. Optional **`.py`** suffix on `--config` is stripped.

@@ -6,6 +6,9 @@ that the training loop can memory-map efficiently.
 
 Default behavior reads data/lichess_games/games_*.txt, tokenizes every game,
 splits into train/val, and saves uint16 binaries + metadata.
+
+Optional --min-elo keeps only games where both players are at least that
+rating (same rule as pipeline/filter_games.py / scrape pipeline).
 """
 
 import argparse
@@ -30,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from patzer.tokenizer import ChessTokenizer
 
 _WORKER_TOK = None
+_MIN_ELO: int | None = None
 
 
 def _use_ansi() -> bool:
@@ -217,6 +221,13 @@ def parse_args():
                         help="Fraction of games to use for validation (default: 0.05)")
     parser.add_argument("--max-games", type=int, default=None,
                         help="Cap number of kept/tokenized games (useful for debugging)")
+    parser.add_argument(
+        "--min-elo",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Keep only games where both WhiteElo and BlackElo are >= N (default: no ELO filter)",
+    )
     parser.add_argument("--block-size", type=int, default=256,
                         help="Context window size, just recorded in meta.json (default: 256)")
     parser.add_argument(
@@ -246,7 +257,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def parse_game_line(line: str) -> tuple[str, list[str]] | None:
+def parse_game_line(line: str, min_elo: int | None = None) -> tuple[str, list[str]] | None:
     """
     Parse one line from games.txt.
 
@@ -254,28 +265,37 @@ def parse_game_line(line: str) -> tuple[str, list[str]] | None:
     e.g.:   1-0 2100 2000 e2e4 e7e5 g1f3 b8c6
 
     Returns (result, moves) or None if line is malformed.
+    If ``min_elo`` is set, returns None unless both ratings are >= ``min_elo``.
     """
     parts = line.strip().split()
     if len(parts) < 4:
         return None
 
     result = parts[0]
-    # parts[1] = white_elo, parts[2] = black_elo — skipped for v1
-    moves = parts[3:]
-
     if result not in ("1-0", "0-1", "1/2-1/2"):
         return None
 
+    try:
+        white_elo = int(parts[1])
+        black_elo = int(parts[2])
+    except ValueError:
+        return None
+
+    if min_elo is not None and (white_elo < min_elo or black_elo < min_elo):
+        return None
+
+    moves = parts[3:]
     return result, moves
 
 
-def _init_worker(vocab_path: str):
-    global _WORKER_TOK
+def _init_worker(vocab_path: str, min_elo: int | None = None):
+    global _WORKER_TOK, _MIN_ELO
     _WORKER_TOK = ChessTokenizer.load(Path(vocab_path))
+    _MIN_ELO = min_elo
 
 
 def _encode_line(line: str) -> list[int] | None:
-    parsed = parse_game_line(line)
+    parsed = parse_game_line(line, min_elo=_MIN_ELO)
     if parsed is None:
         return None
     result, moves = parsed
@@ -289,7 +309,7 @@ def _count_chunk_parse_only(lines: list[str]) -> tuple[int, int, int]:
     kept = 0
     skipped = 0
     for line in lines:
-        if parse_game_line(line) is None:
+        if parse_game_line(line, min_elo=_MIN_ELO) is None:
             skipped += 1
         else:
             kept += 1
@@ -425,7 +445,9 @@ class BufferedBinWriter:
 
 
 def main():
+    global _MIN_ELO
     args = parse_args()
+    _MIN_ELO = args.min_elo
     if args.split_mode == "boundary" and args.max_games is not None:
         print("Error: --max-games is supported only with --split-mode hash.")
         print("Use hash mode for capped-size smoke tests, or run boundary mode without --max-games.")
@@ -461,6 +483,8 @@ def main():
     for f in input_files:
         print(f"  {f}")
     print(f"Output:     {output_dir}")
+    if args.min_elo is not None:
+        print(f"Min ELO:    both players >= {args.min_elo}")
     print(f"Val split:  {args.val_fraction:.1%}")
     print(f"Workers:    {args.workers}")
     print(f"Chunk:      {args.chunk_lines:,} lines")
@@ -498,11 +522,11 @@ def main():
         executor = ProcessPoolExecutor(
             max_workers=args.workers,
             initializer=_init_worker,
-            initargs=(str(vocab_path),),
+            initargs=(str(vocab_path), args.min_elo),
         )
     else:
         executor = None
-        _init_worker(str(vocab_path))
+        _init_worker(str(vocab_path), args.min_elo)
 
     try:
         if args.split_mode == "boundary":
@@ -636,7 +660,7 @@ def main():
             for m in [re.search(r"(\d{4}-\d{2})", Path(f).name)]
             if m for m in [m.group(1)]
         ]),
-        "min_elo_filter": "see source filter_games.py args",
+        "min_elo_prepare": args.min_elo,
         "vocab_size": tok.vocab_size,
         "block_size": args.block_size,
         "split_mode": args.split_mode,
