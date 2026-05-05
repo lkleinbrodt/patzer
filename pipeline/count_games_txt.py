@@ -13,8 +13,9 @@ Examples (from repo root):
   python pipeline/count_games_txt.py --exact
   python pipeline/count_games_txt.py --input data/lichess_games/games_2014-*.txt
 
-  # How many games have both players >= 2000? (reads every line; ignores --estimate/--exact)
-  python pipeline/count_games_txt.py --min-elo 2000
+  # Games at each ELO floor (both players >= cutoff); full file read
+  python pipeline/count_games_txt.py --elo-distribution
+  python pipeline/count_games_txt.py --elo-distribution --elo-low 1600 --elo-high 2800 --elo-step 50
 """
 
 from __future__ import annotations
@@ -50,15 +51,34 @@ def parse_args():
     )
     p.set_defaults(estimate=False, exact=False)
     p.add_argument(
-        "--min-elo",
-        type=int,
-        default=None,
-        metavar="N",
+        "--elo-distribution",
+        action="store_true",
         help=(
-            "Full scan: count lines where both ratings are >= N (matches prepare.py / "
-            "filter_games.py). Reads every line; cannot be combined with byte-based "
-            "--estimate."
+            "Full scan: for each cutoff C, count games where both players have ELO >= C "
+            "(same rule as prepare.py --min-elo). Prints a table; "
+            "default cutoffs: elo-low..elo-high inclusive every elo-step."
         ),
+    )
+    p.add_argument(
+        "--elo-low",
+        type=int,
+        default=1800,
+        metavar="N",
+        help="Lowest cutoff in --elo-distribution (default: %(default)s)",
+    )
+    p.add_argument(
+        "--elo-high",
+        type=int,
+        default=2500,
+        metavar="N",
+        help="Highest cutoff in --elo-distribution (default: %(default)s)",
+    )
+    p.add_argument(
+        "--elo-step",
+        type=int,
+        default=100,
+        metavar="N",
+        help="Spacing between cutoffs (default: %(default)s)",
     )
     return p.parse_args()
 
@@ -126,54 +146,71 @@ def count_newlines(path: Path, chunk: int = 8 * 1024 * 1024) -> int:
             n += b.count(b"\n")
 
 
-def scan_min_elo(paths: list[Path], min_elo: int) -> None:
-    """Stream all files; count games passing the same ELO rule as prepare.py --min-elo."""
+def _elo_cutoffs(elo_low: int, elo_high: int, elo_step: int) -> list[int]:
+    if elo_step <= 0:
+        raise ValueError("elo_step must be positive")
+    if elo_low > elo_high:
+        raise ValueError("elo_low must be <= elo_high")
+    return list(range(elo_low, elo_high + 1, elo_step))
+
+
+def scan_elo_distribution(
+    paths: list[Path],
+    elo_low: int,
+    elo_high: int,
+    elo_step: int,
+) -> None:
+    """
+    For each cutoff C, count games where min(white_elo, black_elo) >= C
+    (equivalent to both >= C).
+    """
     root = Path(__file__).resolve().parent.parent
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    from pipeline.prepare import parse_game_line
+    from pipeline.prepare import parse_game_elos
 
+    cutoffs = _elo_cutoffs(elo_low, elo_high, elo_step)
+    if not cutoffs:
+        print("No cutoffs in range; check --elo-low, --elo-high, --elo-step", file=sys.stderr)
+        sys.exit(2)
+
+    counts = {c: 0 for c in cutoffs}
     total_lines = 0
     parseable = 0
-    pass_elo = 0
-    rows: list[tuple[str, int, int, int, float]] = []
     t0 = time.time()
 
     for p in sorted(paths, key=lambda q: q.name):
-        fl_total = 0
-        fl_parse = 0
-        fl_pass = 0
-        try:
-            mb = p.stat().st_size / (1024 * 1024)
-        except OSError:
-            mb = 0.0
         with open(p, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 total_lines += 1
-                fl_total += 1
-                if parse_game_line(line, min_elo=None) is None:
+                elos = parse_game_elos(line)
+                if elos is None:
                     continue
                 parseable += 1
-                fl_parse += 1
-                if parse_game_line(line, min_elo=min_elo) is not None:
-                    pass_elo += 1
-                    fl_pass += 1
-        rows.append((p.name, fl_total, fl_parse, fl_pass, mb))
+                m = min(elos[0], elos[1])
+                for c in cutoffs:
+                    if m >= c:
+                        counts[c] += 1
 
     dt = time.time() - t0
-    rejected = parseable - pass_elo
 
-    print(f"Min ELO: both players >= {min_elo} (same rule as pipeline/prepare.py --min-elo)")
+    print(
+        "ELO cutoffs: games where both White and Black are >= cutoff "
+        "(same rule as pipeline/prepare.py --min-elo)."
+    )
+    print(f"Cutoffs: {cutoffs[0]} .. {cutoffs[-1]} every {elo_step} "
+          f"({len(cutoffs)} levels)")
     print()
-    w = max(len(r[0]) for r in rows) if rows else 10
-    print(f"  {'file':{w}s}  {'lines':>12}  {'parseable':>12}  {'pass ELO':>12}  MiB")
-    for name, lt, pr, ps, mb in rows:
-        print(f"  {name:{w}s}  {lt:>12,}  {pr:>12,}  {ps:>12,}  {mb:>5.1f}")
+    w = max(len(str(c)) for c in cutoffs)
+    print(f"  {'cutoff':>{w}s}  {'n_games':>14}  {'% of lines':>12}  {'% parseable':>14}")
+    for c in cutoffs:
+        n = counts[c]
+        pct_lines = 100.0 * n / max(total_lines, 1)
+        pct_ok = 100.0 * n / max(parseable, 1)
+        print(f"  {c:{w}d}  {n:>14,}  {pct_lines:>11.2f}%  {pct_ok:>13.2f}%")
     print()
-    print(f"Total lines in files:     {total_lines:,}")
-    print(f"Parseable game lines:     {parseable:,}  (valid result + integer ELOs + moves)")
-    print(f"Games passing min-elo:    {pass_elo:,}  ({100.0 * pass_elo / max(total_lines, 1):.2f}% of all lines)")
-    print(f"Parseable but below ELO:  {rejected:,}  ({100.0 * rejected / max(parseable, 1):.2f}% of parseable)")
+    print(f"Total lines in files:  {total_lines:,}")
+    print(f"Parseable game lines:  {parseable:,}")
     print(f"Read time: {dt:.1f}s ({total_lines / max(dt, 1e-6) / 1e6:.2f}M lines/s)")
 
 
@@ -185,14 +222,18 @@ def main() -> None:
         print("No input files matched. Check --input globs.", file=sys.stderr)
         sys.exit(1)
 
-    if args.min_elo is not None:
+    if args.elo_distribution:
         if args.estimate or args.exact:
             print(
-                "Note: with --min-elo, line counts use a full parse scan "
+                "Note: --elo-distribution performs a full parse scan "
                 "(--estimate / --exact ignored).",
                 file=sys.stderr,
             )
-        scan_min_elo(paths, args.min_elo)
+        try:
+            scan_elo_distribution(paths, args.elo_low, args.elo_high, args.elo_step)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(2)
         return
 
     use_estimate = args.estimate or not args.exact

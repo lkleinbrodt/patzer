@@ -257,16 +257,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def parse_game_line(line: str, min_elo: int | None = None) -> tuple[str, list[str]] | None:
-    """
-    Parse one line from games.txt.
-
-    Format: {result} {white_elo} {black_elo} {uci_move} {uci_move} ...
-    e.g.:   1-0 2100 2000 e2e4 e7e5 g1f3 b8c6
-
-    Returns (result, moves) or None if line is malformed.
-    If ``min_elo`` is set, returns None unless both ratings are >= ``min_elo``.
-    """
+def _parsed_game_fields(line: str) -> tuple[str, int, int, list[str]] | None:
+    """Parse a games.txt row into result, ratings, and UCI moves, or None if invalid."""
     parts = line.strip().split()
     if len(parts) < 4:
         return None
@@ -281,10 +273,37 @@ def parse_game_line(line: str, min_elo: int | None = None) -> tuple[str, list[st
     except ValueError:
         return None
 
+    moves = parts[3:]
+    return result, white_elo, black_elo, moves
+
+
+def parse_game_elos(line: str) -> tuple[int, int] | None:
+    """
+    Return (white_elo, black_elo) if ``line`` is a valid games.txt game row, else None.
+    Does not apply ``--min-elo`` filtering (see ``parse_game_line``).
+    """
+    p = _parsed_game_fields(line)
+    if p is None:
+        return None
+    return p[1], p[2]
+
+
+def parse_game_line(line: str, min_elo: int | None = None) -> tuple[str, list[str]] | None:
+    """
+    Parse one line from games.txt.
+
+    Format: {result} {white_elo} {black_elo} {uci_move} {uci_move} ...
+    e.g.:   1-0 2100 2000 e2e4 e7e5 g1f3 b8c6
+
+    Returns (result, moves) or None if line is malformed.
+    If ``min_elo`` is set, returns None unless both ratings are >= ``min_elo``.
+    """
+    p = _parsed_game_fields(line)
+    if p is None:
+        return None
+    result, white_elo, black_elo, moves = p
     if min_elo is not None and (white_elo < min_elo or black_elo < min_elo):
         return None
-
-    moves = parts[3:]
     return result, moves
 
 
