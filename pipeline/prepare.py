@@ -11,11 +11,14 @@ splits into train/val, and saves uint16 binaries + metadata.
 import argparse
 import glob
 import hashlib
+import itertools
 import json
 import os
 import re
 import sys
 import time
+from collections import deque
+from functools import partial
 from datetime import UTC, datetime
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
@@ -223,6 +226,13 @@ def parse_args():
                               "(default: hash)."))
     parser.add_argument("--seed", type=int, default=1337,
                         help="Seed used by hash split mode (default: 1337)")
+    parser.add_argument(
+        "--max-in-flight",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max chunk tasks queued to workers (default: 2 × workers; lower on low-RAM machines)",
+    )
     return parser.parse_args()
 
 
@@ -290,25 +300,51 @@ def _tokenize_chunk(lines: list[str]) -> tuple[list[list[int]], int, int]:
     return games, skipped, n_lines
 
 
-def _tokenize_chunk_with_lines(
-    lines: list[str],
-) -> tuple[list[tuple[str, list[int]]], int, int]:
-    games: list[tuple[str, list[int]]] = []
+def _stable_split_value(line: str, seed: int) -> float:
+    # Deterministic pseudo-random in [0, 1), stable across runs/machines.
+    digest = hashlib.md5(f"{seed}:{line}".encode("utf-8")).digest()
+    return int.from_bytes(digest, "big") / float(2**128)
+
+
+def _tokenize_chunk_for_hash_split(
+    lines: list[str], seed: int
+) -> tuple[list[tuple[float, list[int]]], int, int]:
+    """
+    Like _tokenize_chunk, but also compute the hash-split score per line in-process.
+
+    Returning (split_val, token_ids) instead of (line, token_ids) avoids pickling
+    every full game line back to the parent, which is very large on big runs.
+    """
+    games: list[tuple[float, list[int]]] = []
     skipped = 0
     for line in lines:
         token_ids = _encode_line(line)
         if token_ids is None:
             skipped += 1
             continue
-        games.append((line, token_ids))
+        games.append((_stable_split_value(line, seed), token_ids))
     n_lines = len(lines)
     return games, skipped, n_lines
 
 
-def _stable_split_value(line: str, seed: int) -> float:
-    # Deterministic pseudo-random in [0, 1), stable across runs/machines.
-    digest = hashlib.md5(f"{seed}:{line}".encode("utf-8")).digest()
-    return int.from_bytes(digest, "big") / float(2**128)
+def _bounded_map(executor, fn, iterable, *, max_in_flight: int):
+    """
+    Memory-bounded alternative to executor.map.
+
+    executor.map eagerly drains the input iterator and submits all futures at
+    once, causing unbounded memory growth on large datasets. This helper keeps
+    at most `max_in_flight` futures pending at any time by reading the input
+    lazily. Result order is preserved.
+    """
+    pending: deque = deque()
+    it = iter(iterable)
+    for item in itertools.islice(it, max_in_flight):
+        pending.append(executor.submit(fn, item))
+    for item in it:
+        yield pending.popleft().result()
+        pending.append(executor.submit(fn, item))
+    while pending:
+        yield pending.popleft().result()
 
 
 def iter_line_chunks(
@@ -417,6 +453,13 @@ def main():
     print(f"Val split:  {args.val_fraction:.1%}")
     print(f"Workers:    {args.workers}")
     print(f"Chunk:      {args.chunk_lines:,} lines")
+    max_in_flight = (
+        max(1, args.max_in_flight)
+        if args.max_in_flight is not None
+        else max(1, args.workers * 2)
+    )
+    if args.workers > 1:
+        print(f"Max flight: {max_in_flight} pending chunks (bounded executor queue)")
     print(f"Split mode: {args.split_mode}\n")
 
     est_lines, avg_bpl = estimate_total_lines(input_files)
@@ -461,7 +504,12 @@ def main():
             )
             chunks = iter_line_chunks(input_files, args.chunk_lines, label="Pass 1/2 · read")
             if executor:
-                count_results = executor.map(_count_chunk_parse_only, chunks, chunksize=4)
+                count_results = _bounded_map(
+                    executor,
+                    _count_chunk_parse_only,
+                    chunks,
+                    max_in_flight=max_in_flight,
+                )
             else:
                 count_results = map(_count_chunk_parse_only, chunks)
             for kept, skipped, n_lines in count_results:
@@ -488,7 +536,12 @@ def main():
             )
             chunks = iter_line_chunks(input_files, args.chunk_lines, label="Pass 2/2 · read")
             if executor:
-                tok_results = executor.map(_tokenize_chunk, chunks, chunksize=4)
+                tok_results = _bounded_map(
+                    executor,
+                    _tokenize_chunk,
+                    chunks,
+                    max_in_flight=max_in_flight,
+                )
             else:
                 tok_results = map(_tokenize_chunk, chunks)
             for games, encode_skipped, n_lines in tok_results:
@@ -517,20 +570,26 @@ def main():
                 exact_total_games=exact_cap,
             )
             chunks = iter_line_chunks(input_files, args.chunk_lines, label="Hash split · read")
+            hash_fn = partial(_tokenize_chunk_for_hash_split, seed=args.seed)
             if executor:
-                tok_results = executor.map(_tokenize_chunk_with_lines, chunks, chunksize=4)
+                tok_results = _bounded_map(
+                    executor,
+                    hash_fn,
+                    chunks,
+                    max_in_flight=max_in_flight,
+                )
             else:
-                tok_results = map(_tokenize_chunk_with_lines, chunks)
+                tok_results = map(hash_fn, chunks)
 
             for games, skipped, n_lines in tok_results:
                 total_skipped += skipped
                 kept_this_chunk = 0
-                for line, token_ids in games:
+                for split_val, token_ids in games:
                     if args.max_games and total_kept >= args.max_games:
                         break
                     total_kept += 1
                     kept_this_chunk += 1
-                    if _stable_split_value(line, args.seed) < args.val_fraction:
+                    if split_val < args.val_fraction:
                         val_writer.append(token_ids)
                     else:
                         train_writer.append(token_ids)
@@ -572,6 +631,7 @@ def main():
         "split_mode": args.split_mode,
         "seed": args.seed if args.split_mode == "hash" else None,
         "workers": args.workers,
+        "max_in_flight": max_in_flight,
         "chunk_lines": args.chunk_lines,
         "flush_tokens": args.flush_tokens,
         "total_games": total_kept,

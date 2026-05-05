@@ -1,5 +1,9 @@
 I want to write one (or many) blog posts about this project. So we should keep a running log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-05:** **`pipeline/prepare.py` — further memory / tuning:** hash split no longer returns full game **lines** from workers (only precomputed **`split_val` + `token_ids`**), avoiding huge pickling/IPC of every line. **`--max-in-flight N`** overrides the default **`2 × workers`** cap on the bounded executor queue.
+
+- **2026-05-05:** **`pipeline/prepare.py`** — Restored **`_bounded_map`** after **`ProcessPoolExecutor.map`** slipped back in. **`map`** eagerly consumes the full chunk iterator (submitting every chunk before work finishes), which blows RAM on large **`games_*.txt`** runs; **`_bounded_map`** keeps at most **`workers × 2`** futures in flight while preserving result order (boundary split safe).
+
 - **2026-05-04:** **Synced local `~/Projects/lichess-bot` → `chewy:~/Projects/lichess-bot` via `rsync -avzL`** (excluded `.venv`, `__pycache__`, mac junk). **`homemade.py`** was a symlink to Patzer’s shim; **`-L`** copied the real file so Linux doesn’t point at a Mac-only path.
 
 - **2026-05-04:** **`build_blog_assets.py` — fixed `VERSION_META` architecture for v1/v2** (was wrongly **12L/8H/256d**; configs are **6L/6H/384d**). **`patzer_page.html` hero:** training tokens **404B → 2.85B** (v4 train split per `train_patzer_v4.py`). Regenerated **`scripts/blog_assets/*.json`** + embedded **`window.BLOG_DATA`**.
