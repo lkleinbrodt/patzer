@@ -1,5 +1,15 @@
 I want to write one (or many) blog posts about this project. So we should keep a running log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-04:** **Scrape → R2.** **`pipeline/scrape_lichess.py`** gained **`--push-r2`** (after each month: **`games_YYYY-MM.txt`**, stats, **`progress.json`**, **`scrape.log`**). **`launch.py train`** is the training entrypoint; legacy **`launch.py --config …`** inserts **`train`**. Pull on a workstation: **`python r2.py pull data/lichess_games`**. **`requirements.txt`**: added **`requests`** (used by scrape). *(Earlier **`launch.py scrape`** for Vast CPU was added then removed in favor of DigitalOcean — see **`pipeline/droplet_scrape.sh`**.)*
+
+- **2026-05-04:** **`scrape_lichess.py --min-month YYYY-MM`** — drop dumps strictly before that month (string order). Use **`--min-month 2020-04`** when older months already exist locally (e.g. chewy); **`--min-month 2013-01`** (or similar) for full history.
+
+- **2026-05-04:** **Lichess scrape → DigitalOcean droplet** — **`pipeline/droplet_scrape.sh`** (`sync` / `push-env` / `setup` / `run`) rsyncs the repo (skips **`data/`**), copies **`.env`**, installs **`wget`/`zstd`/python3** + minimal pip deps, runs **`scrape_lichess.py`** over SSH. **`CLAUDE.md`** updated.
+
+- **2026-05-04:** Removed **`launch.py scrape`** / all Vast CPU scrape wiring from **`launch.py`**; **`launch.py`** is GPU training only.
+
+- **2026-05-05:** **`pipeline/droplet_scrape.sh setup`** now creates **`~/patzer/.venv`** and **`pip install`s** scrape deps inside it (Ubuntu PEP 668 blocks system pip; **`python-chess`** must be installed for **`import chess`**). Run scrape with **`.venv/bin/python`**. **`pipeline/DROPLET_SCRAPE.md`** troubleshooting section.
+
 - **2026-05-05:** **High-ELO prepared splits — `prepare.py` + `count_games_txt.py`.** **`pipeline/prepare.py`** accepts **`--min-elo N`** (both players **≥ N**, same as **`filter_games.py`**). **`pipeline/count_games_txt.py --elo-distribution`** scans **`games_*.txt`** and prints how many games survive each ELO floor (default cutoffs **1800–2500** every **100**; **`--elo-low` / `--elo-high` / `--elo-step`** override). **`meta.json`** records **`min_elo_prepare`**.
 
 - **2026-05-05:** **`train_patzer_v6.py` added** — same **16L / 16H / 768d** + WSD as v5; **`dataset = 'prepared_min_elo_2100'`** (~**1.73B** train tokens, **2100+** ELO). Output **`checkpoints/patzer_v6`**.

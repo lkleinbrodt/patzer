@@ -1,5 +1,5 @@
 """
-Launch a Vast.ai GPU instance for patzer training.
+Launch Vast.ai GPU instances for patzer training.
 
 Before any rent or --instance SSH, launch.py verifies `patzer/config/<name>.py` exists,
 compiles, and executes locally (exit 2 on failure). --list / --status skip this check.
@@ -7,14 +7,16 @@ compiles, and executes locally (exit 2 on failure). --list / --status skip this 
 Default search includes ``cuda_vers>=12.4`` so hosts report driver ABI compatible with our
 CUDA 12.4 PyTorch image; override with ``--min-cuda-vers 0`` to disable.
 
-python launch.py                          # rent cheapest offer, confirm prompt
-python launch.py --search-only            # print offers and exit
-python launch.py --list                   # show your running instances
-python launch.py --instance 12345678      # train on an existing instance (wipe + fresh clone)
-python launch.py --config train_patzer_v1
-python launch.py --resume                 # pull R2 checkpoint and pass --init_from=resume
-python launch.py --interruptible          # spot pricing (~50% cheaper, can be preempted)
-python launch.py --max-price 0.30
+  python launch.py train                      # rent cheapest offer, confirm prompt
+  python launch.py train --search-only        # print offers and exit
+  python launch.py train --list               # show your running instances
+  python launch.py train --instance 12345678  # train on an existing instance (wipe + fresh clone)
+  python launch.py train --config train_patzer_v1
+  python launch.py train --resume             # pull R2 checkpoint and pass --init_from=resume
+
+Legacy (still works): ``python launch.py --config train_patzer_v1`` inserts the ``train`` subcommand.
+
+Lichess scraping runs on your own host (e.g. DigitalOcean): see ``pipeline/droplet_scrape.sh`` and CLAUDE.md.
 """
 
 import argparse
@@ -510,119 +512,25 @@ Training started on instance {instance_id}.
 """)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True,
-                        help="Config filename without .py (e.g. train_patzer_v3)")
-    parser.add_argument("--resume", action="store_true",
-                        help="Pull R2 checkpoint before training (pass init_from=resume)")
-    parser.add_argument(
-        "--wandb-run-id",
-        default="",
-        help="W&B run id to resume into (only used with --resume). Example: a41yuxdq",
-    )
-    parser.add_argument("--instance", type=int, metavar="ID",
-                        help="Run on an existing instance instead of renting a new one")
-    parser.add_argument("--list", action="store_true",
-                        help="List your running instances and exit")
-    parser.add_argument("--status", type=int, metavar="ID",
-                        help="Show status and recent log for a running instance")
-    parser.add_argument("--disk", type=int, default=40,
-                        help="Disk size in GB for new instances (default: 40)")
-    parser.add_argument("--min-gpu-ram", type=int, default=8,
-                        help="Min GPU VRAM in GB (default: 8)")
-    parser.add_argument("--max-price", type=float, default=0.60,
-                        help="Max $/hr (default: 0.60)")
-    parser.add_argument(
-        "--up-gb-per-hr",
-        type=float,
-        default=None,
-        help="Override expected upload volume (GB/hr) for all-in $/hr (default: auto-estimate)",
-    )
-    parser.add_argument(
-        "--down-gb-per-hr",
-        type=float,
-        default=None,
-        help="Override expected download volume (GB/hr) for all-in $/hr (default: amortized training data download)",
-    )
-    parser.add_argument(
-        "--ckpt-gb",
-        type=float,
-        default=0.5,
-        help="Checkpoint size in GB used for bandwidth estimate (default: 0.5)",
-    )
-    parser.add_argument(
-        "--mins-per-1k-steps",
-        type=float,
-        default=7.0,
-        help="Training speed in minutes per 1000 steps (default: 7.0)",
-    )
-    parser.add_argument(
-        "--improve-rate-per-eval",
-        type=float,
-        default=0.861,
-        help="Probability an eval is a new best (default: 0.861 from recent v3 run)",
-    )
-    parser.add_argument(
-        "--training-data-gb",
-        type=float,
-        default=1.0,
-        help="One-time training data download size in GB (default: 1.0)",
-    )
-    parser.add_argument(
-        "--amortize-download-over-hours",
-        type=float,
-        default=24.0,
-        help="Amortize training-data download over N hours when estimating down GB/hr (default: 24)",
-    )
-    parser.add_argument(
-        "--max-inet-up-cost",
-        type=float,
-        default=None,
-        help="Filter offers by max upload bandwidth cost ($/GB). Default: no filter.",
-    )
-    parser.add_argument(
-        "--max-inet-down-cost",
-        type=float,
-        default=None,
-        help="Filter offers by max download bandwidth cost ($/GB). Default: no filter.",
-    )
-    parser.add_argument("--search-only", action="store_true",
-                        help="Print available offers and exit")
-    parser.add_argument("--limit", type=int, default=10,
-                        help="Number of offers to show (default: 10)")
-    parser.add_argument("--interruptible", "-i", action="store_true",
-                        help="Use spot/interruptible pricing (~50%% cheaper, can be preempted)")
-    parser.add_argument(
-        "--min-cuda-vers",
-        type=float,
-        default=12.4,
-        metavar="VERS",
-        help=(
-            "Minimum Vast offer cuda_vers (host max CUDA from driver). "
-            "Default 12.4 matches pytorch+cu12.4 images; use 0 to disable."
-        ),
-    )
-    parser.add_argument(
-        "--allow-sliced-gpus",
-        action="store_true",
-        help=(
-            "Allow offers that are 1 GPU from a multi-GPU machine (gpu_frac<1). "
-            "By default we filter to single-GPU machines (gpu_frac=1)."
-        ),
-    )
-    parser.add_argument("--terminate-on-error", action="store_true",
-                        help="Destroy instance even if training fails (default: keep alive for debugging)")
-    args = parser.parse_args()
-
-    if args.list:
-        list_instances()
+def _legacy_prepend_train(argv: list[str]) -> None:
+    """Support ``launch.py --config train_patzer_v4`` without the ``train`` keyword."""
+    if len(argv) <= 1:
         return
-
-    if args.status:
-        show_status(args.status)
+    first = argv[1]
+    if first == "train":
         return
+    # Removed ``scrape`` subcommand — don't prepend ``train`` so argparse fails clearly.
+    if first == "scrape":
+        return
+    # Top-level-only flags (must not insert ``train``, or ``--help`` shows the wrong parser).
+    if first in ("-h", "--help", "--list"):
+        return
+    if first == "--status":
+        return
+    argv.insert(1, "train")
 
+
+def cmd_train(args: argparse.Namespace) -> None:
     # Fail fast before SSH / vast create if config is missing or broken.
     if args.config.endswith(".py"):
         args.config = args.config[:-3]
@@ -677,11 +585,10 @@ def main():
     )
     cfg_vars = bw_meta.get("config_vars", {}) or {}
     eval_interval = cfg_vars.get("eval_interval", 1000)
-    always_save = cfg_vars.get("always_save_checkpoint", True)
     print(
         f"\nBandwidth assumptions for all-in $/hr:"
         f"\n  upload: {up_gb_per_hr:.3f} GB/hr  (ckpt_gb={args.ckpt_gb}, improve_rate/eval={args.improve_rate_per_eval:.3f}, "
-        f"mins_per_1k_steps={args.mins_per_1k_steps}, eval_interval={eval_interval}, always_save_checkpoint={always_save})"
+        f"mins_per_1k_steps={args.mins_per_1k_steps}, eval_interval={eval_interval}, always_save_checkpoint={cfg_vars.get('always_save_checkpoint', True)})"
         f"\n  download: {down_gb_per_hr:.3f} GB/hr  (training_data_gb={args.training_data_gb} amortized over {args.amortize_download_over_hours} hr)"
     )
 
@@ -779,6 +686,134 @@ Instance {instance_id} is running!
 Training is starting via the onstart script (git clone → pip install → train).
 Checkpoints will push to R2 at every eval interval.
 """)
+
+
+def main():
+    _legacy_prepend_train(sys.argv)
+
+    parser = argparse.ArgumentParser(description="Patzer Vast.ai GPU training launcher.")
+    parser.add_argument("--list", action="store_true",
+                        help="List your running instances and exit")
+    parser.add_argument("--status", type=int, metavar="ID", default=None,
+                        help="Show status and recent training log for an instance")
+
+    sub = parser.add_subparsers(dest="cmd", metavar="COMMAND", required=False)
+
+    train_p = sub.add_parser("train", help="Rent a GPU and run patzer training")
+    train_p.add_argument("--config", required=True,
+                         help="Config filename without .py (e.g. train_patzer_v3)")
+    train_p.add_argument("--resume", action="store_true",
+                         help="Pull R2 checkpoint before training (pass init_from=resume)")
+    train_p.add_argument(
+        "--wandb-run-id",
+        default="",
+        help="W&B run id to resume into (only used with --resume). Example: a41yuxdq",
+    )
+    train_p.add_argument("--instance", type=int, metavar="ID",
+                         help="Run on an existing instance instead of renting a new one")
+    train_p.add_argument("--disk", type=int, default=40,
+                         help="Disk size in GB for new instances (default: 40)")
+    train_p.add_argument("--min-gpu-ram", type=int, default=8,
+                         help="Min GPU VRAM in GB (default: 8)")
+    train_p.add_argument("--max-price", type=float, default=0.60,
+                         help="Max $/hr (default: 0.60)")
+    train_p.add_argument(
+        "--up-gb-per-hr",
+        type=float,
+        default=None,
+        help="Override expected upload volume (GB/hr) for all-in $/hr (default: auto-estimate)",
+    )
+    train_p.add_argument(
+        "--down-gb-per-hr",
+        type=float,
+        default=None,
+        help="Override expected download volume (GB/hr) for all-in $/hr (default: amortized training data download)",
+    )
+    train_p.add_argument(
+        "--ckpt-gb",
+        type=float,
+        default=0.5,
+        help="Checkpoint size in GB used for bandwidth estimate (default: 0.5)",
+    )
+    train_p.add_argument(
+        "--mins-per-1k-steps",
+        type=float,
+        default=7.0,
+        help="Training speed in minutes per 1000 steps (default: 7.0)",
+    )
+    train_p.add_argument(
+        "--improve-rate-per-eval",
+        type=float,
+        default=0.861,
+        help="Probability an eval is a new best (default: 0.861 from recent v3 run)",
+    )
+    train_p.add_argument(
+        "--training-data-gb",
+        type=float,
+        default=1.0,
+        help="One-time training data download size in GB (default: 1.0)",
+    )
+    train_p.add_argument(
+        "--amortize-download-over-hours",
+        type=float,
+        default=24.0,
+        help="Amortize training-data download over N hours when estimating down GB/hr (default: 24)",
+    )
+    train_p.add_argument(
+        "--max-inet-up-cost",
+        type=float,
+        default=None,
+        help="Filter offers by max upload bandwidth cost ($/GB). Default: no filter.",
+    )
+    train_p.add_argument(
+        "--max-inet-down-cost",
+        type=float,
+        default=None,
+        help="Filter offers by max download bandwidth cost ($/GB). Default: no filter.",
+    )
+    train_p.add_argument("--search-only", action="store_true",
+                         help="Print available offers and exit")
+    train_p.add_argument("--limit", type=int, default=10,
+                         help="Number of offers to show (default: 10)")
+    train_p.add_argument("--interruptible", "-i", action="store_true",
+                         help="Use spot/interruptible pricing (~50%% cheaper, can be preempted)")
+    train_p.add_argument(
+        "--min-cuda-vers",
+        type=float,
+        default=12.4,
+        metavar="VERS",
+        help=(
+            "Minimum Vast offer cuda_vers (host max CUDA from driver). "
+            "Default 12.4 matches pytorch+cu12.4 images; use 0 to disable."
+        ),
+    )
+    train_p.add_argument(
+        "--allow-sliced-gpus",
+        action="store_true",
+        help=(
+            "Allow offers that are 1 GPU from a multi-GPU machine (gpu_frac<1). "
+            "By default we filter to single-GPU machines (gpu_frac=1)."
+        ),
+    )
+    train_p.add_argument("--terminate-on-error", action="store_true",
+                         help="Destroy instance even if training fails (default: keep alive for debugging)")
+
+    args = parser.parse_args()
+
+    if args.list:
+        list_instances()
+        return
+
+    if args.status is not None:
+        show_status(args.status)
+        return
+
+    if not args.cmd:
+        parser.error("specify the train command (see --help). "
+                     "Example: python launch.py train --config train_patzer_v4")
+
+    if args.cmd == "train":
+        cmd_train(args)
 
 
 if __name__ == "__main__":

@@ -123,8 +123,8 @@ def parse_games(pgn_stream, output_file, args):
             elapsed = time.time() - start_time
             rate = stats["total_games"] / elapsed
             print(
-                f"  {stats['total_games']:,} games processed, "
-                f"{stats['kept_games']:,} kept "
+                f"[parse] {stats['total_games']:,} games from filter fed to parser, "
+                f"wrote lines for {stats['kept_games']:,} "
                 f"({100 * stats['kept_games'] / stats['total_games']:.1f}%) "
                 f"| {rate:.0f} games/sec",
                 file=sys.stderr,

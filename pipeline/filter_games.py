@@ -116,8 +116,11 @@ def main():
             if in_game:
                 total += 1
                 if total % args.log_every == 0:
-                    print(f"Processed {total:,} games, kept {kept:,} "
-                          f"({100*kept/total:.1f}%)", file=sys.stderr)
+                    print(
+                        f"[filter] seen {total:,} games from dump, passed ELO/other filters "
+                        f"{kept:,} ({100 * kept / total:.1f}%)",
+                        file=sys.stderr,
+                    )
 
             # Reset for new game
             current_headers = {}
@@ -144,8 +147,11 @@ def main():
             sys.stdout.write("".join(current_lines))
             kept += 1
 
-    print(f"\nDone. Processed {total:,} games, kept {kept:,} "
-          f"({100*kept/total:.1f}% kept)", file=sys.stderr)
+    print(
+        f"\n[filter] done: seen {total:,} games from dump, passed filters {kept:,} "
+        f"({100 * kept / total:.1f}% passed)",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":

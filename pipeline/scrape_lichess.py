@@ -13,6 +13,9 @@ Usage:
     # Process specific months
     python scrape_lichess.py --output-dir ./data --months 2024-01 2024-02 2024-03
 
+    # Skip months before a cutoff (e.g. you already have older games on another machine)
+    python scrape_lichess.py --output-dir ./data --min-month 2020-04
+
     # Filter options (passed through to filter_games.py and parse_pgn.py)
     python scrape_lichess.py --output-dir ./data --min-elo 1800 --min-moves 10 --max-moves 200
 
@@ -45,7 +48,65 @@ from datetime import datetime
 
 import requests
 
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _r2_key_for_path(repo_root: Path, path: Path) -> str:
+    """S3 key mirroring repo-relative paths (must not use absolute paths as keys)."""
+    try:
+        return str(path.resolve().relative_to(repo_root.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def push_outputs_to_r2(output_dir: Path, month: str) -> bool:
+    """
+    Upload games_*.txt, stats, progress, and scrape.log for resumable sync to R2.
+    Requires R2 env vars and patzer/r2.py. Returns False if nothing was pushed or r2 unavailable.
+    """
+    repo_root = _repo_root()
+    patzer_dir = repo_root / "patzer"
+    if not patzer_dir.is_dir():
+        log.error("patzer/ not found next to pipeline/; cannot push to R2")
+        return False
+    pd = str(patzer_dir)
+    if pd not in sys.path:
+        sys.path.insert(0, pd)
+    import r2  # noqa: E402
+
+    ok = True
+    for name in (f"games_{month}.txt", f"games_{month}.stats.json"):
+        p = output_dir / name
+        if not p.is_file():
+            log.error(f"Cannot push missing file: {p}")
+            ok = False
+            continue
+        key = _r2_key_for_path(repo_root, p)
+        if not r2.push_file(p, key):
+            log.error(f"R2 push failed for {key} (check R2_* env vars)")
+            ok = False
+
+    prog = output_dir / "progress.json"
+    if prog.is_file():
+        if not r2.push_file(prog, _r2_key_for_path(repo_root, prog)):
+            ok = False
+
+    # Flush log file so R2 gets complete tail
+    for h in log.handlers:
+        if isinstance(h, logging.FileHandler):
+            h.flush()
+    lf = output_dir / "scrape.log"
+    if lf.is_file():
+        if not r2.push_file(lf, _r2_key_for_path(repo_root, lf)):
+            ok = False
+
+    return ok
+
 # ── constants ────────────────────────────────────────────────────────────────
+
+_MONTH_YYYY_MM = re.compile(r"^\d{4}-\d{2}$")
 
 LIST_URL = "https://database.lichess.org/standard/list.txt"
 SHA256_URL = "https://database.lichess.org/standard/sha256sums.txt"
@@ -249,6 +310,13 @@ def save_progress(progress_file, completed_months):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+def _parse_min_month(s: str) -> str:
+    s = s.strip()
+    if not _MONTH_YYYY_MM.match(s):
+        raise argparse.ArgumentTypeError("min-month must be YYYY-MM")
+    return s
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Download and process Lichess game database dumps."
@@ -259,6 +327,14 @@ def parse_args():
     parser.add_argument("--months", type=str, nargs="+", default=None,
                         help="Specific months to process e.g. 2024-01 2024-02. "
                              "If not set, processes all available months.")
+    parser.add_argument(
+        "--min-month",
+        type=_parse_min_month,
+        default=None,
+        metavar="YYYY-MM",
+        help="Only process dump months on or after this (inclusive). "
+             "Use when older months are already available locally.",
+    )
     parser.add_argument("--max-months", type=int, default=None,
                         help="Process at most this many months (oldest first). "
                              "Useful for a first run e.g. --max-months 12.")
@@ -279,6 +355,12 @@ def parse_args():
                         help="Show what would be processed without doing anything")
     parser.add_argument("--delay", type=int, default=POLITE_DELAY,
                         help=f"Seconds to wait between downloads (default: {POLITE_DELAY})")
+    parser.add_argument(
+        "--push-r2",
+        action="store_true",
+        help="After each completed month, upload games/statistics/progress/log to R2 "
+             "(same keys as local paths under the repo root). Requires R2_* env vars.",
+    )
     return parser.parse_args()
 
 
@@ -320,6 +402,17 @@ def main():
         requested = set(args.months)
         all_files = [f for f in all_files if extract_month(f) in requested]
         log.info(f"Filtered to {len(all_files)} requested months")
+
+    if args.min_month:
+        n_before = len(all_files)
+        all_files = [
+            f for f in all_files
+            if (m := extract_month(f)) is not None and m >= args.min_month
+        ]
+        log.info(
+            f"Filtered to months >= {args.min_month}: {len(all_files)} files "
+            f"(from {n_before} after prior filters)"
+        )
 
     # Cap at max_months (applied before skipping completed, so it's a
     # limit on the total universe not just what's left to do)
@@ -416,6 +509,12 @@ def main():
         save_progress(progress_file, completed)
         success_count += 1
         log.info(f"✓ {month} complete → {output_path.name}")
+
+        if args.push_r2:
+            if push_outputs_to_r2(output_dir, month):
+                log.info(f"Pushed {month} artifacts to R2")
+            else:
+                log.error("R2 push failed after completing month (see errors above)")
 
         # ── Polite delay before next download ─────────────────────────
         if i < len(todo) - 1:

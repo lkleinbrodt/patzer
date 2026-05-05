@@ -55,22 +55,48 @@ Replace `train_patzer_v4.py` with the versioned config you want to train (e.g., 
 
 ```bash
 # List available GPU offers
-python launch.py --search-only
+python launch.py train --search-only
 
 # Rent cheapest GPU and start training (prompts for confirmation)
-python launch.py --config train_patzer_v4
+python launch.py train --config train_patzer_v4
 
 # Run on an existing instance
-python launch.py --instance <ID> --config train_patzer_v4
+python launch.py train --instance <ID> --config train_patzer_v4
 
 # Resume training from R2 checkpoint
-python launch.py --config train_patzer_v4 --resume
+python launch.py train --config train_patzer_v4 --resume
 
 # List your running instances
 python launch.py --list
 ```
 
-Replace `train_patzer_v4` with the versioned config you want to train.
+The `train` subcommand is optional for backward compatibility: `python launch.py --config train_patzer_v4` still works. Replace `train_patzer_v4` with the versioned config you want to train.
+
+### Lichess scrape on a DigitalOcean droplet (recommended)
+
+Short copy-paste sequence (SSH + tmux): **[pipeline/DROPLET_SCRAPE.md](pipeline/DROPLET_SCRAPE.md)**.
+
+Run `pipeline/scrape_lichess.py` on a small CPU droplet; **`--push-r2`** uploads `data/lichess_games/` (same paths as locally) to R2. Put **`R2_*`** credentials in a repo-root **`.env`** on your laptop, sync code + `.env` to the droplet, install apt/python deps once, then run the scraper (optionally under **`tmux`** so it survives disconnects).
+
+```bash
+export PATZER_DROPLET='root@YOUR_DROPLET_IP'
+
+./pipeline/droplet_scrape.sh sync       # rsync tree to ~/patzer (excludes data/, .venv, …)
+./pipeline/droplet_scrape.sh push-env   # scp .env → ~/patzer/.env
+./pipeline/droplet_scrape.sh setup      # wget, zstd, python3, pip install scrape deps
+
+# Foreground (prints logs):
+./pipeline/droplet_scrape.sh run -- --output-dir data/lichess_games --push-r2 \
+  --min-month 2020-04 --min-elo 1800
+
+# Or SSH in and use tmux (after setup: use venv Python):
+ssh "$PATZER_DROPLET"
+tmux new -s scrape
+cd ~/patzer && .venv/bin/python pipeline/scrape_lichess.py --output-dir data/lichess_games --push-r2 \
+  --min-month 2020-04 --min-elo 1800 2>&1 | tee scrape.log
+```
+
+Pull games elsewhere (e.g. workstation): **`cd patzer && python r2.py pull data/lichess_games`**.
 
 ### Checkpoint sync (Cloudflare R2)
 
@@ -259,7 +285,7 @@ Uploads use **`put_object`** (streamed body) instead of boto3 `upload_file` / S3
 
 ### Cloud launch (`launch.py`)
 
-Manages Vast.ai GPU instances via the `vastai` CLI. On new instance creation, builds a bootstrap shell script that: exports R2 env vars, clones the repo, pip-installs, optionally pulls a checkpoint from R2, then runs `train.py` inside a `tmux` session. Training output is tailed at `/workspace/train.log`.
+Manages **Vast.ai GPU** training via the `vastai` CLI. **`launch.py train`** uses the PyTorch CUDA image: exports R2 env vars, clones the repo, pip-installs, optionally pulls a checkpoint from R2, then runs `train.py` in `tmux`; logs at `/workspace/train.log`. Lichess scraping runs on your own CPU host (e.g. **DigitalOcean** droplet — see above), not via `launch.py`.
 
 ## Key conventions
 

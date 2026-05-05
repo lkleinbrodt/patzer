@@ -1,5 +1,6 @@
 python-chess
 boto3
 python-dotenv
+requests
 wandb
 pygame
