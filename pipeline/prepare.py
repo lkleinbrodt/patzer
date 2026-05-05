@@ -27,6 +27,7 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
+import gzip
 
 # Allow imports from project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -209,9 +210,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--input", type=str, nargs="+",
-                        default=["data/lichess_games/games_*.txt"],
+                        default=["data/lichess_games/games_*.txt*"],
                         help="Input file(s) or glob pattern(s). "
-                             "e.g. data/lichess_games/games_2013-*.txt")
+                             "e.g. data/lichess_games/games_2013-*.txt or games_2013-*.txt.gz")
     parser.add_argument("--output-dir", type=str, default="data/prepared",
                         help="Output directory for binary files (default: data/prepared)")
     parser.add_argument("--vocab", type=str, default="data/vocab.json",
@@ -421,7 +422,11 @@ def iter_line_chunks(
         _stderr_clear_tty_progress_line()
         sys.stderr.write(hdr + "\n")
         sys.stderr.flush()
-        with open(input_path, "r") as f:
+        if str(input_path).endswith(".gz"):
+            fctx = gzip.open(input_path, "rt", encoding="utf-8", errors="replace")
+        else:
+            fctx = open(input_path, "r", encoding="utf-8", errors="replace")
+        with fctx as f:
             for line in f:
                 chunk.append(line)
                 if len(chunk) >= chunk_lines:

@@ -77,14 +77,24 @@ def push_outputs_to_r2(output_dir: Path, month: str) -> bool:
     import r2  # noqa: E402
 
     ok = True
-    for name in (f"games_{month}.txt", f"games_{month}.stats.json"):
-        p = output_dir / name
-        if not p.is_file():
-            log.error(f"Cannot push missing file: {p}")
+    games_candidates = [output_dir / f"games_{month}.txt.gz", output_dir / f"games_{month}.txt"]
+    games_path = next((p for p in games_candidates if p.is_file()), None)
+    if games_path is None:
+        log.error(f"Cannot push missing file (tried .txt.gz and .txt): games_{month}")
+        ok = False
+    else:
+        key = _r2_key_for_path(repo_root, games_path)
+        if not r2.push_file(games_path, key):
+            log.error(f"R2 push failed for {key} (check R2_* env vars)")
             ok = False
-            continue
-        key = _r2_key_for_path(repo_root, p)
-        if not r2.push_file(p, key):
+
+    stats_p = output_dir / f"games_{month}.stats.json"
+    if not stats_p.is_file():
+        log.error(f"Cannot push missing file: {stats_p}")
+        ok = False
+    else:
+        key = _r2_key_for_path(repo_root, stats_p)
+        if not r2.push_file(stats_p, key):
             log.error(f"R2 push failed for {key} (check R2_* env vars)")
             ok = False
 
@@ -359,6 +369,12 @@ def parse_args():
                              "Default: fast mode (skips PGN tree building).")
     parser.add_argument("--keep-zst", action="store_true", default=False,
                         help="Keep the .zst files after processing (default: delete them)")
+    parser.add_argument(
+        "--no-compress",
+        action="store_true",
+        default=False,
+        help="Write monthly games output as plain .txt instead of .txt.gz (default: compress).",
+    )
     parser.add_argument("--skip-verify", action="store_true", default=False,
                         help="Skip SHA256 verification (faster but riskier)")
     parser.add_argument("--dry-run", action="store_true", default=False,
@@ -454,7 +470,7 @@ def main():
         month = extract_month(filename)
         url = BASE_URL + filename
         zst_path = output_dir / filename
-        output_path = output_dir / f"games_{month}.txt"
+        output_path = output_dir / (f"games_{month}.txt" if args.no_compress else f"games_{month}.txt.gz")
         stats_path = output_dir / f"games_{month}.stats.json"
 
         log.info(f"\n{'='*60}")

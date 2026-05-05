@@ -25,6 +25,7 @@ Stats are written to a separate JSON file for inspection.
 """
 
 import argparse
+import gzip
 import json
 import multiprocessing as mp
 import os
@@ -464,7 +465,15 @@ def main():
     if workers is None:
         workers = max(1, (os.cpu_count() or 2) - 1)
 
-    stats_path = args.stats_output or (args.output + ".stats.json")
+    # Default stats path: keep stable name even if output is .gz
+    if args.stats_output:
+        stats_path = args.stats_output
+    else:
+        out_p = Path(args.output)
+        if out_p.suffix == ".gz":
+            stats_path = str(out_p.with_suffix("").with_suffix(".stats.json"))
+        else:
+            stats_path = args.output + ".stats.json"
 
     mode_str = "validate" if args.validate else "fast"
     print(f"Parsing PGN → UCI moves ({mode_str} mode, {workers} workers)", file=sys.stderr)
@@ -477,7 +486,12 @@ def main():
     else:
         pgn_stream = sys.stdin
 
-    with open(args.output, "w", encoding="utf-8") as out_f:
+    if str(args.output).endswith(".gz"):
+        out_open = lambda p: gzip.open(p, "wt", encoding="utf-8", compresslevel=6)  # noqa: E731
+    else:
+        out_open = lambda p: open(p, "w", encoding="utf-8")  # noqa: E731
+
+    with out_open(args.output) as out_f:
         if workers <= 1:
             stats = parse_games_sequential(pgn_stream, out_f, args)
         else:
