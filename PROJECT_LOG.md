@@ -1,5 +1,9 @@
 I want to write one (or many) blog posts about this project. So we should keep a running log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-05:** **`launch.py` Vast search + remote CUDA preflight** — default query adds **`cuda_vers>=12.4`** (override with **`--min-cuda-vers 0`** to disable). Offer table includes a **CUDA** column (`cuda_max_good` / `cuda_vers`). Bootstrap script runs a **`torch.cuda.is_available()`** check in **`patzer/`** before R2 / `train.py` (exit **3** if no GPU).
+
+- **2026-05-05:** **`launch.py` config preflight** — before `--instance` or renting, **`validate_train_config()`** checks `patzer/config/{name}.py` exists under the repo, compiles, and `exec`s with normal builtins (typos / syntax errors fail locally with **exit 2**). **`--list` / `--status`** unchanged. Optional **`.py`** suffix on `--config` is stripped.
+
 - **2026-05-05:** **`train_patzer_v5.py` added** — **16L / 16H / 768d**, same **prepared** data as v4. **`model.get_num_params()` ≈ 116.5M** at init (not ~85M — vocab/block). **WSD** @ **6e-4**, **`auto_cooldown=True`**, **`cooldown_iters=38000`**, **`warmup_iters=5000`**, **`early_stop_min_iters=150000`**. Output **`checkpoints/patzer_v5`**.
 
 - **2026-05-05:** **`pipeline/prepare.py` — stderr layout:** before each per-file log line, clear an in-place TTY progress line (`\r` + **EL** erase) so it no longer splices into the **Hash split · read** headers.

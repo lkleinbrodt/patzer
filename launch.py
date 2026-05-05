@@ -1,6 +1,12 @@
 """
 Launch a Vast.ai GPU instance for patzer training.
 
+Before any rent or --instance SSH, launch.py verifies `patzer/config/<name>.py` exists,
+compiles, and executes locally (exit 2 on failure). --list / --status skip this check.
+
+Default search includes ``cuda_vers>=12.4`` so hosts report driver ABI compatible with our
+CUDA 12.4 PyTorch image; override with ``--min-cuda-vers 0`` to disable.
+
 python launch.py                          # rent cheapest offer, confirm prompt
 python launch.py --search-only            # print offers and exit
 python launch.py --list                   # show your running instances
@@ -185,6 +191,11 @@ trap _on_exit EXIT"""
         notify_fn,
         trap,
         "cd patzer",
+        # Before R2 data pull / train: fail fast on driver–container CUDA mismatch.
+        "python -u -c 'import sys, torch; ok=torch.cuda.is_available(); "
+        'print("torch.cuda.is_available():", ok); '
+        'print(torch.cuda.get_device_name(0) if ok else "(none)"); '
+        "sys.exit(0 if ok else 3)'",
         pull_ckpt,
         (
             f"if [ ! -f '{out_dir}/ckpt.pt' ]; then "
@@ -211,10 +222,10 @@ def print_offers(offers):
         return f"{x:>{width}.4f}"
 
     print(
-        f"\n  {'#':>3}  {'GPU':<28} {'VRAM':>6} {'Base$/hr':>8} {'All-in$/hr':>9} "
+        f"\n  {'#':>3}  {'GPU':<28} {'CUDA':>5} {'VRAM':>6} {'Base$/hr':>8} {'All-in$/hr':>9} "
         f"{'Up$/GB':>7} {'Dn$/GB':>7} {'Reliability':>11}  {'ID':>10}"
     )
-    print("  " + "-" * 104)
+    print("  " + "-" * 112)
     for i, o in enumerate(offers):
         vram_gb = int(o["gpu_ram"]) // 1024
         base = o.get("dph_total")
@@ -222,8 +233,15 @@ def print_offers(offers):
         dn = o.get("inet_down_cost")
         all_in = o.get("_all_in_dph")
         rel = o.get("reliability2")
+        cuda_v = o.get("cuda_max_good")
+        if cuda_v is None:
+            cuda_v = o.get("cuda_vers")
+        try:
+            cuda_s = f"{float(cuda_v):.1f}" if cuda_v is not None else "?"
+        except (TypeError, ValueError):
+            cuda_s = "?"
         print(
-            f"  {i+1:>3}  {o['gpu_name']:<28} {vram_gb:>5}G "
+            f"  {i+1:>3}  {o['gpu_name']:<28} {cuda_s:>5} {vram_gb:>5}G "
             f"{fmt_money(base, 8)} {fmt_money(all_in, 9)} "
             f"{fmt_cost(up, 7)} {fmt_cost(dn, 7)} "
             f"{(rel if rel is not None else 0):>11.3f}  {o['id']:>10}"
@@ -244,6 +262,61 @@ def _offer_all_in_dph(
     up_cost = float(offer.get("inet_up_cost") or 0.0)
     dn_cost = float(offer.get("inet_down_cost") or 0.0)
     return base + up_cost * up_gb_per_hr + dn_cost * down_gb_per_hr
+
+
+_CONFIG_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def validate_train_config(config_name: str) -> Path:
+    """
+    Ensure `patzer/config/{config_name}.py` exists, is under the repo config dir,
+    compiles, and executes (same as `train.py` would `exec` the file).
+    Call before any Vast SSH/rent path so a typo fails fast locally.
+    """
+    if not _CONFIG_NAME_RE.match(config_name):
+        print(
+            f"Invalid --config {config_name!r}: expected a basename like train_patzer_v5 "
+            "(letters, digits, underscore; no path or .py suffix).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    repo = Path(__file__).resolve().parent
+    cfg_dir = (repo / "patzer" / "config").resolve()
+    cfg_path = (cfg_dir / f"{config_name}.py").resolve()
+    try:
+        cfg_path.relative_to(cfg_dir)
+    except ValueError:
+        print(f"Refusing config path outside {cfg_dir}: {cfg_path}", file=sys.stderr)
+        sys.exit(2)
+    if not cfg_path.is_file():
+        print(
+            f"Config not found: {cfg_path}\n"
+            f"Expected patzer/config/{config_name}.py under the repo root.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    source = cfg_path.read_text(encoding="utf-8")
+    try:
+        code = compile(source, str(cfg_path), "exec")
+    except SyntaxError as e:
+        print(f"Syntax error in config {cfg_path}:\n{e}", file=sys.stderr)
+        sys.exit(2)
+    ns: dict[str, object] = {
+        "__builtins__": __builtins__,
+        "__name__": "__patzer_launch_config_check__",
+        "__file__": str(cfg_path),
+    }
+    try:
+        exec(code, ns, ns)
+    except Exception as e:
+        print(
+            f"Config fails at import/exec time (train.py would hit the same error): "
+            f"{cfg_path}\n{type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    print(f"Config OK: {cfg_path}")
+    return cfg_path
 
 
 def _read_train_config_vars(config_name: str) -> dict:
@@ -521,6 +594,16 @@ def main():
     parser.add_argument("--interruptible", "-i", action="store_true",
                         help="Use spot/interruptible pricing (~50%% cheaper, can be preempted)")
     parser.add_argument(
+        "--min-cuda-vers",
+        type=float,
+        default=12.4,
+        metavar="VERS",
+        help=(
+            "Minimum Vast offer cuda_vers (host max CUDA from driver). "
+            "Default 12.4 matches pytorch+cu12.4 images; use 0 to disable."
+        ),
+    )
+    parser.add_argument(
         "--allow-sliced-gpus",
         action="store_true",
         help=(
@@ -540,6 +623,11 @@ def main():
         show_status(args.status)
         return
 
+    # Fail fast before SSH / vast create if config is missing or broken.
+    if args.config.endswith(".py"):
+        args.config = args.config[:-3]
+    validate_train_config(args.config)
+
     if args.instance:
         run_on_instance(
             args.instance,
@@ -556,6 +644,8 @@ def main():
         f"num_gpus=1 gpu_ram>={args.min_gpu_ram} rentable=true verified=true "
         f"compute_cap>=750 dph_total<={args.max_price}"
     )
+    if args.min_cuda_vers and args.min_cuda_vers > 0:
+        query += f" cuda_vers>={args.min_cuda_vers}"
     if not args.allow_sliced_gpus:
         query += " gpu_frac=1"
     if args.max_inet_up_cost is not None:
