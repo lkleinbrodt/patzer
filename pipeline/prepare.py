@@ -47,6 +47,12 @@ def _c(s: str, *codes: str) -> str:
     return "".join(codes) + s + "\033[0m"
 
 
+def _stderr_clear_tty_progress_line() -> None:
+    """End any in-place (\\r) stderr status line before printing another line."""
+    if sys.stderr.isatty():
+        sys.stderr.write("\r\x1b[2K")
+
+
 def _fmt_duration(seconds: float) -> str:
     if not (seconds == seconds):  # NaN
         return "—"
@@ -213,8 +219,12 @@ def parse_args():
                         help="Cap number of kept/tokenized games (useful for debugging)")
     parser.add_argument("--block-size", type=int, default=256,
                         help="Context window size, just recorded in meta.json (default: 256)")
-    parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 1) - 1),
-                        help="Tokenizer worker processes (default: cpu_count-1)")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=min(4, max(1, (os.cpu_count() or 1) - 1)),
+        help="Tokenizer worker processes (default: min(4, cpu_count-1); cap avoids RAM spikes on big runs)",
+    )
     parser.add_argument("--chunk-lines", type=int, default=50_000,
                         help="Lines per work chunk (default: 50000)")
     parser.add_argument("--flush-tokens", type=int, default=2_000_000,
@@ -369,6 +379,7 @@ def iter_line_chunks(
             + f"  file {idx + 1}/{n_files}: {p.name}  "
             + _c(f"({size_mb:.1f} MiB)", "\033[2m")
         )
+        _stderr_clear_tty_progress_line()
         sys.stderr.write(hdr + "\n")
         sys.stderr.flush()
         with open(input_path, "r") as f:
