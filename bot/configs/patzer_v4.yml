@@ -55,7 +55,7 @@ engine:
     think_jitter_ms: 50
 
 challenge:
-  concurrency: 2
+  concurrency: 1
   sort_by: "best"
   preference: "none"
   accept_bot: true
