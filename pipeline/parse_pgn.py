@@ -15,11 +15,19 @@ Usage:
     python parse_pgn.py --input filtered.pgn --output games.txt --min-moves 10 --max-moves 200
     cat filtered.pgn | python parse_pgn.py --output games.txt
 
+    # Fast mode (default): skip chess.pgn tree building, use direct board.parse_san loop
+    cat filtered.pgn | python parse_pgn.py --output games.txt --workers 4
+
+    # Strict mode: full python-chess PGN validation (slower, for debugging)
+    cat filtered.pgn | python parse_pgn.py --output games.txt --validate
+
 Stats are written to a separate JSON file for inspection.
 """
 
 import argparse
 import json
+import multiprocessing as mp
+import os
 import re
 import sys
 import time
@@ -45,34 +53,71 @@ def parse_args():
                         help="Maximum number of moves to keep a game (default: 200)")
     parser.add_argument("--log-every", type=int, default=10_000,
                         help="Log progress every N games (default: 10000)")
+    parser.add_argument("--validate", action="store_true", default=False,
+                        help="Use full chess.pgn validation (slower, for debugging). "
+                             "Default is fast mode which skips PGN tree building.")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Number of parallel worker processes for SAN→UCI conversion. "
+                             "Default: cpu_count-1 (min 1). Set 1 to disable multiprocessing.")
+    parser.add_argument("--batch-size", type=int, default=2000,
+                        help="Games per batch sent to workers (default: 2000)")
     return parser.parse_args()
 
 
 # Strip PGN comments like { [%eval 0.17] [%clk 0:05:00] }
 COMMENT_RE = re.compile(r"\{[^}]*\}")
+MOVE_NUM_RE = re.compile(r"\d+\.+\s*")
 
-# Valid result strings
 VALID_RESULTS = {"1-0", "0-1", "1/2-1/2"}
 
 
 def clean_pgn_moves(moves_text):
     """Remove comments and move numbers, return just the SAN move tokens."""
-    # Remove comments
     text = COMMENT_RE.sub("", moves_text)
-    # Remove move numbers (e.g. "1." "12." "5...")
-    text = re.sub(r"\d+\.+", "", text)
-    # Remove result string at end
+    text = MOVE_NUM_RE.sub("", text)
     for r in VALID_RESULTS:
         text = text.replace(r, "")
+    text = text.replace("*", "")
     return text.split()
 
 
-def pgn_to_uci(pgn_text):
+def fast_pgn_to_uci(game_lines):
     """
-    Convert a single PGN game string to a list of UCI moves.
-    Returns (uci_moves, error_message). On failure, uci_moves is None.
-    Relies on python-chess PGN parsing for legality checks.
-    Illegal or ambiguous SAN moves are captured in game.errors.
+    Fast SAN→UCI conversion: extract SAN tokens from PGN lines and push
+    through a chess.Board. Skips the heavy chess.pgn.read_game() tree builder.
+    Returns (uci_moves_list, error_string_or_None).
+    """
+    moves_text_parts = []
+    for line in game_lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("["):
+            moves_text_parts.append(stripped)
+
+    if not moves_text_parts:
+        return None, "no moves"
+
+    san_tokens = clean_pgn_moves(" ".join(moves_text_parts))
+    if not san_tokens:
+        return None, "no moves"
+
+    board = chess.Board()
+    uci_moves = []
+    for san in san_tokens:
+        try:
+            move = board.parse_san(san)
+        except (chess.IllegalMoveError, chess.AmbiguousMoveError,
+                chess.InvalidMoveError, ValueError):
+            return None, "illegal move"
+        uci_moves.append(move.uci())
+        board.push(move)
+
+    return uci_moves, None
+
+
+def validated_pgn_to_uci(pgn_text):
+    """
+    Full chess.pgn validation (original behavior). Builds PGN game tree and
+    checks for errors reported by the parser.
     """
     try:
         game = chess.pgn.read_game(io.StringIO(pgn_text))
@@ -88,12 +133,17 @@ def pgn_to_uci(pgn_text):
     return [move.uci() for move in game.mainline_moves()], None
 
 
-def parse_games(pgn_stream, output_file, args):
+# ── Worker function for multiprocessing ───────────────────────────────────────
+
+def _process_batch(args):
     """
-    Stream through a PGN file, parse each game, write UCI sequences.
-    Returns a stats dict.
+    Worker: process a batch of games, return (output_lines, partial_stats).
+    Each game is (headers_dict, game_lines_list).
+    args is (games_batch, min_moves, max_moves, validate_mode).
     """
-    stats = {
+    games_batch, min_moves, max_moves, validate_mode = args
+
+    partial_stats = {
         "total_games": 0,
         "kept_games": 0,
         "skipped_illegal_move": 0,
@@ -102,81 +152,207 @@ def parse_games(pgn_stream, output_file, args):
         "skipped_bad_result": 0,
         "skipped_parse_error": 0,
         "result_counts": {"1-0": 0, "0-1": 0, "1/2-1/2": 0},
-        "move_length_histogram": {},  # bucket by 10s
-        "elo_histogram": {},           # bucket by 100s
+        "move_length_histogram": {},
+        "elo_histogram": {},
     }
 
-    start_time = time.time()
+    output_lines = []
 
-    # Buffer lines into individual game strings
+    for headers, game_lines in games_batch:
+        partial_stats["total_games"] += 1
+
+        result = headers.get("Result", "")
+        if result not in VALID_RESULTS:
+            partial_stats["skipped_bad_result"] += 1
+            continue
+
+        try:
+            white_elo = int(headers.get("WhiteElo", 0))
+            black_elo = int(headers.get("BlackElo", 0))
+        except ValueError:
+            white_elo, black_elo = 0, 0
+
+        if validate_mode:
+            pgn_text = "".join(game_lines)
+            uci_moves, error = validated_pgn_to_uci(pgn_text)
+        else:
+            uci_moves, error = fast_pgn_to_uci(game_lines)
+
+        if uci_moves is None:
+            if "illegal" in (error or ""):
+                partial_stats["skipped_illegal_move"] += 1
+            else:
+                partial_stats["skipped_parse_error"] += 1
+            continue
+
+        n_moves = len(uci_moves)
+
+        if n_moves < min_moves:
+            partial_stats["skipped_too_short"] += 1
+            continue
+
+        if n_moves > max_moves:
+            partial_stats["skipped_too_long"] += 1
+            continue
+
+        line = f"{result} {white_elo} {black_elo} {' '.join(uci_moves)}\n"
+        output_lines.append(line)
+
+        partial_stats["kept_games"] += 1
+        partial_stats["result_counts"][result] = \
+            partial_stats["result_counts"].get(result, 0) + 1
+
+        bucket_moves = (n_moves // 10) * 10
+        partial_stats["move_length_histogram"][bucket_moves] = \
+            partial_stats["move_length_histogram"].get(bucket_moves, 0) + 1
+
+        avg_elo = (white_elo + black_elo) // 2
+        bucket_elo = (avg_elo // 100) * 100
+        partial_stats["elo_histogram"][bucket_elo] = \
+            partial_stats["elo_histogram"].get(bucket_elo, 0) + 1
+
+    return output_lines, partial_stats
+
+
+# ── Stats helpers ─────────────────────────────────────────────────────────────
+
+def _empty_stats():
+    return {
+        "total_games": 0,
+        "kept_games": 0,
+        "skipped_illegal_move": 0,
+        "skipped_too_short": 0,
+        "skipped_too_long": 0,
+        "skipped_bad_result": 0,
+        "skipped_parse_error": 0,
+        "result_counts": {"1-0": 0, "0-1": 0, "1/2-1/2": 0},
+        "move_length_histogram": {},
+        "elo_histogram": {},
+    }
+
+
+def _merge_stats(target, partial):
+    """Merge partial_stats into target (mutates target)."""
+    for key in ("total_games", "kept_games", "skipped_illegal_move",
+                "skipped_too_short", "skipped_too_long",
+                "skipped_bad_result", "skipped_parse_error"):
+        target[key] += partial[key]
+    for r in VALID_RESULTS:
+        target["result_counts"][r] += partial["result_counts"].get(r, 0)
+    for k, v in partial["move_length_histogram"].items():
+        target["move_length_histogram"][k] = \
+            target["move_length_histogram"].get(k, 0) + v
+    for k, v in partial["elo_histogram"].items():
+        target["elo_histogram"][k] = \
+            target["elo_histogram"].get(k, 0) + v
+
+
+# ── Game reader (accumulates PGN stream into game tuples) ─────────────────────
+
+def read_games(pgn_stream):
+    """
+    Yield (headers_dict, game_lines_list) from a PGN stream.
+    Game boundaries are detected by [Event ...] lines.
+    """
     current_game_lines = []
     current_headers = {}
 
-    def flush_game():
-        nonlocal current_game_lines, current_headers
+    for raw_line in pgn_stream:
+        if isinstance(raw_line, bytes):
+            line = raw_line.decode("utf-8", errors="replace")
+        else:
+            line = raw_line
 
-        if not current_game_lines:
-            return
+        stripped = line.strip()
 
+        if stripped.startswith("[Event "):
+            if current_game_lines:
+                yield current_headers, current_game_lines
+            current_game_lines = [line]
+            current_headers = {}
+        else:
+            if current_game_lines:
+                current_game_lines.append(line)
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    key = stripped[1:stripped.index(" ")]
+                    value = stripped[stripped.index('"') + 1:stripped.rindex('"')]
+                    current_headers[key] = value
+                except Exception:
+                    pass
+
+    if current_game_lines:
+        yield current_headers, current_game_lines
+
+
+def batch_games(game_iter, batch_size):
+    """Collect games from iterator into batches of batch_size."""
+    batch = []
+    for game in game_iter:
+        batch.append(game)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+# ── Sequential (single-process) path ──────────────────────────────────────────
+
+def parse_games_sequential(pgn_stream, output_file, args):
+    """Process games sequentially in the main process. Used when workers=1."""
+    stats = _empty_stats()
+    start_time = time.time()
+
+    for headers, game_lines in read_games(pgn_stream):
         stats["total_games"] += 1
+
         if stats["total_games"] % args.log_every == 0:
             elapsed = time.time() - start_time
             rate = stats["total_games"] / elapsed
             print(
-                f"[parse] {stats['total_games']:,} games from filter fed to parser, "
-                f"wrote lines for {stats['kept_games']:,} "
+                f"[parse] {stats['total_games']:,} games processed, "
+                f"kept {stats['kept_games']:,} "
                 f"({100 * stats['kept_games'] / stats['total_games']:.1f}%) "
                 f"| {rate:.0f} games/sec",
                 file=sys.stderr,
             )
 
-        pgn_text = "".join(current_game_lines)
-
-        # Extract result and ELO from already-parsed headers
-        result = current_headers.get("Result", "")
+        result = headers.get("Result", "")
         if result not in VALID_RESULTS:
             stats["skipped_bad_result"] += 1
-            current_game_lines = []
-            current_headers = {}
-            return
+            continue
 
         try:
-            white_elo = int(current_headers.get("WhiteElo", 0))
-            black_elo = int(current_headers.get("BlackElo", 0))
+            white_elo = int(headers.get("WhiteElo", 0))
+            black_elo = int(headers.get("BlackElo", 0))
         except ValueError:
             white_elo, black_elo = 0, 0
 
-        # Parse moves
-        uci_moves, error = pgn_to_uci(pgn_text)
+        if args.validate:
+            pgn_text = "".join(game_lines)
+            uci_moves, error = validated_pgn_to_uci(pgn_text)
+        else:
+            uci_moves, error = fast_pgn_to_uci(game_lines)
 
         if uci_moves is None:
             if "illegal" in (error or ""):
                 stats["skipped_illegal_move"] += 1
             else:
                 stats["skipped_parse_error"] += 1
-            current_game_lines = []
-            current_headers = {}
-            return
+            continue
 
         n_moves = len(uci_moves)
-
         if n_moves < args.min_moves:
             stats["skipped_too_short"] += 1
-            current_game_lines = []
-            current_headers = {}
-            return
-
+            continue
         if n_moves > args.max_moves:
             stats["skipped_too_long"] += 1
-            current_game_lines = []
-            current_headers = {}
-            return
+            continue
 
-        # Write output line: result white_elo black_elo move1 move2 ...
         line = f"{result} {white_elo} {black_elo} {' '.join(uci_moves)}\n"
         output_file.write(line)
 
-        # Update stats
         stats["kept_games"] += 1
         stats["result_counts"][result] = stats["result_counts"].get(result, 0) + 1
 
@@ -189,40 +365,65 @@ def parse_games(pgn_stream, output_file, args):
         stats["elo_histogram"][bucket_elo] = \
             stats["elo_histogram"].get(bucket_elo, 0) + 1
 
-        current_game_lines = []
-        current_headers = {}
+    stats["elapsed_seconds"] = round(time.time() - start_time, 1)
+    return stats
 
-    for raw_line in pgn_stream:
-        if isinstance(raw_line, bytes):
-            line = raw_line.decode("utf-8", errors="replace")
-        else:
-            line = raw_line
 
-        stripped = line.strip()
+# ── Parallel (multi-process) path ─────────────────────────────────────────────
 
-        if stripped.startswith("[Event "):
-            flush_game()
-            current_game_lines = [line]
-            current_headers = {}
-        else:
-            if current_game_lines:
-                current_game_lines.append(line)
+def parse_games_parallel(pgn_stream, output_file, args, workers):
+    """
+    Process games in parallel using a pool of worker processes.
 
-            # Parse headers as we go
-            if stripped.startswith("[") and stripped.endswith("]"):
-                try:
-                    key = stripped[1:stripped.index(" ")]
-                    value = stripped[stripped.index('"') + 1:stripped.rindex('"')]
-                    current_headers[key] = value
-                except Exception:
-                    pass
+    Architecture:
+      - Main thread reads PGN stream and accumulates games into batches
+      - Batches are dispatched to workers via imap_unordered
+      - Workers do the expensive SAN→UCI conversion
+      - Main thread writes results and merges stats
+    """
+    stats = _empty_stats()
+    start_time = time.time()
+    batch_size = args.batch_size
 
-    # Flush final game
-    flush_game()
+    print(
+        f"[parse] parallel mode: {workers} workers, batch_size={batch_size}",
+        file=sys.stderr,
+    )
+
+    game_iter = read_games(pgn_stream)
+    batches = batch_games(game_iter, batch_size)
+
+    def make_work_items():
+        for batch in batches:
+            yield (batch, args.min_moves, args.max_moves, args.validate)
+
+    batches_done = 0
+
+    with mp.Pool(processes=workers) as pool:
+        for output_lines, partial_stats in pool.imap_unordered(
+            _process_batch, make_work_items(), chunksize=1
+        ):
+            _merge_stats(stats, partial_stats)
+            for line in output_lines:
+                output_file.write(line)
+
+            batches_done += 1
+            if (batches_done * batch_size) % args.log_every < batch_size:
+                elapsed = time.time() - start_time
+                rate = stats["total_games"] / max(elapsed, 0.001)
+                print(
+                    f"[parse] {stats['total_games']:,} games processed, "
+                    f"kept {stats['kept_games']:,} "
+                    f"({100 * stats['kept_games'] / max(stats['total_games'], 1):.1f}%) "
+                    f"| {rate:.0f} games/sec | {workers} workers",
+                    file=sys.stderr,
+                )
 
     stats["elapsed_seconds"] = round(time.time() - start_time, 1)
     return stats
 
+
+# ── Output ────────────────────────────────────────────────────────────────────
 
 def print_stats_summary(stats):
     total = stats["total_games"]
@@ -259,9 +460,14 @@ def print_stats_summary(stats):
 def main():
     args = parse_args()
 
+    workers = args.workers
+    if workers is None:
+        workers = max(1, (os.cpu_count() or 2) - 1)
+
     stats_path = args.stats_output or (args.output + ".stats.json")
 
-    print(f"Parsing PGN → UCI moves", file=sys.stderr)
+    mode_str = "validate" if args.validate else "fast"
+    print(f"Parsing PGN → UCI moves ({mode_str} mode, {workers} workers)", file=sys.stderr)
     print(f"  min_moves={args.min_moves}, max_moves={args.max_moves}", file=sys.stderr)
     print(f"  output={args.output}", file=sys.stderr)
     print(f"  stats={stats_path}\n", file=sys.stderr)
@@ -272,14 +478,18 @@ def main():
         pgn_stream = sys.stdin
 
     with open(args.output, "w", encoding="utf-8") as out_f:
-        stats = parse_games(pgn_stream, out_f, args)
+        if workers <= 1:
+            stats = parse_games_sequential(pgn_stream, out_f, args)
+        else:
+            stats = parse_games_parallel(pgn_stream, out_f, args, workers)
 
     if args.input:
         pgn_stream.close()
 
     print_stats_summary(stats)
 
-    # Sort histogram keys for clean JSON output
+    stats["mode"] = mode_str
+    stats["workers"] = workers
     stats["move_length_histogram"] = dict(
         sorted((int(k), v) for k, v in stats["move_length_histogram"].items()))
     stats["elo_histogram"] = dict(

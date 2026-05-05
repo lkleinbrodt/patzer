@@ -252,6 +252,10 @@ def run_pipeline(zst_path, output_path, stats_path, args):
         "--max-moves", str(args.max_moves),
         "--log-every", "50000",
     ]
+    if args.validate:
+        parse_cmd.append("--validate")
+    if args.workers:
+        parse_cmd += ["--workers", str(args.workers)]
 
     log.info(f"  filter: {' '.join(filter_cmd)}")
     log.info(f"  parse:  {' '.join(parse_cmd)}")
@@ -347,6 +351,12 @@ def parse_args():
                         help="Minimum moves per game (default: 10)")
     parser.add_argument("--max-moves", type=int, default=200,
                         help="Maximum moves per game (default: 200)")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Parallel workers for parse_pgn.py SAN→UCI conversion. "
+                             "Default: cpu_count-1 (min 1). Set 1 to disable.")
+    parser.add_argument("--validate", action="store_true", default=False,
+                        help="Enable full python-chess PGN validation (slower). "
+                             "Default: fast mode (skips PGN tree building).")
     parser.add_argument("--keep-zst", action="store_true", default=False,
                         help="Keep the .zst files after processing (default: delete them)")
     parser.add_argument("--skip-verify", action="store_true", default=False,
