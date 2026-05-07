@@ -560,6 +560,10 @@ def cmd_train(args: argparse.Namespace) -> None:
         query += f" inet_up_cost<={args.max_inet_up_cost}"
     if args.max_inet_down_cost is not None:
         query += f" inet_down_cost<={args.max_inet_down_cost}"
+    if args.gpu_name:
+        # Vast query strings: spaces in gpu_name must be underscores (e.g. RTX_4090).
+        gn = str(args.gpu_name).strip().replace(" ", "_")
+        query += f" gpu_name={gn}"
 
     search_args = ["search", "offers", query, "-o", "dph_total", "--limit", str(args.limit)]
     if args.interruptible:
@@ -715,8 +719,24 @@ def main():
                          help="Disk size in GB for new instances (default: 40)")
     train_p.add_argument("--min-gpu-ram", type=int, default=8,
                          help="Min GPU VRAM in GB (default: 8)")
-    train_p.add_argument("--max-price", type=float, default=0.60,
-                         help="Max $/hr (default: 0.60)")
+    train_p.add_argument(
+        "--max-price",
+        type=float,
+        default=0.60,
+        help=(
+            "Max base $/hr filter (dph_total). Default 0.60 excludes most RTX 4090 class "
+            "offers — try e.g. 1.2–2.5 with --search-only to browse."
+        ),
+    )
+    train_p.add_argument(
+        "--gpu-name",
+        metavar="MODEL",
+        default="",
+        help=(
+            "Restrict search to one GPU model (Vast gpu_name field). "
+            'Examples: RTX_4090, \"RTX 4090\". Spaces are converted to underscores.'
+        ),
+    )
     train_p.add_argument(
         "--up-gb-per-hr",
         type=float,
@@ -773,8 +793,16 @@ def main():
     )
     train_p.add_argument("--search-only", action="store_true",
                          help="Print available offers and exit")
-    train_p.add_argument("--limit", type=int, default=10,
-                         help="Number of offers to show (default: 10)")
+    train_p.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help=(
+            "Max offers fetched from Vast (sorted ascending by base $/hr). "
+            "Default 10 is almost always cheap low-end GPUs; use a larger limit or "
+            "--gpu-name RTX_4090 to surface specific models."
+        ),
+    )
     train_p.add_argument("--interruptible", "-i", action="store_true",
                          help="Use spot/interruptible pricing (~50%% cheaper, can be preempted)")
     train_p.add_argument(
