@@ -10,7 +10,8 @@ CUDA 12.4 PyTorch image; override with ``--min-cuda-vers 0`` to disable.
   python launch.py train                      # rent cheapest offer, confirm prompt
   python launch.py train --search-only        # print offers and exit
   python launch.py train --list               # show your running instances
-  python launch.py train --instance 12345678  # train on an existing instance (wipe + fresh clone)
+  python launch.py train --instance 12345678  # train on an existing instance (in-place update; keeps data/)
+  python launch.py train --instance 12345678 --full-reset  # wipe /workspace/patzer and fresh clone
   python launch.py train --config train_patzer_v1
   python launch.py train --resume             # pull R2 checkpoint and pass --init_from=resume
 
@@ -185,8 +186,16 @@ trap _on_exit EXIT"""
         # we write them explicitly so they're available to the training process.
         r2_export_lines(),
         "env | grep -E '^R2_' >> /etc/environment",
+        # Existing instances often have large `data/` trees already downloaded.
+        # Default behavior is to KEEP them and update the repo in-place.
+        # Use --full-reset (wipe=True) to drop the whole workspace and reclone.
         f"rm -rf {WORKSPACE}" if wipe else "",
-        f"git clone {GITHUB_REPO} {WORKSPACE}",
+        (
+            # Fresh clone if missing OR after wipe. Otherwise in-place update.
+            f"if [ -d '{WORKSPACE}/.git' ]; then "
+            f"cd {WORKSPACE} && git fetch --all --prune && git reset --hard origin/main && git clean -fd; "
+            f"else git clone {GITHUB_REPO} {WORKSPACE}; fi"
+        ),
         f"cd {WORKSPACE}",
         "pip install -q -r requirements.txt",
         "pip install -q vastai",
@@ -457,6 +466,7 @@ def run_on_instance(
     instance_id: int,
     config: str,
     resume: bool,
+    full_reset: bool = False,
     terminate_on_error: bool = False,
     wandb_run_id: str | None = None,
 ):
@@ -470,12 +480,15 @@ def run_on_instance(
     host = info.get("ssh_host") or info.get("public_ipaddr")
     port = info.get("ssh_port", 22)
     print(f"Instance is running — {info.get('gpu_name', '?')} @ {host}:{port}")
-    print(f"Wiping {WORKSPACE} and doing a fresh clone...")
+    if full_reset:
+        print(f"FULL RESET: wiping {WORKSPACE} and doing a fresh clone...")
+    else:
+        print(f"Updating {WORKSPACE} in-place (keeps data/)...")
 
     script = build_script(
         config,
         resume,
-        wipe=True,
+        wipe=full_reset,
         terminate_on_error=terminate_on_error,
         wandb_run_id=wandb_run_id,
     )
@@ -541,6 +554,7 @@ def cmd_train(args: argparse.Namespace) -> None:
             args.instance,
             args.config,
             args.resume,
+            args.full_reset,
             args.terminate_on_error,
             args.wandb_run_id or None,
         )
@@ -715,6 +729,14 @@ def main():
     )
     train_p.add_argument("--instance", type=int, metavar="ID",
                          help="Run on an existing instance instead of renting a new one")
+    train_p.add_argument(
+        "--full-reset",
+        action="store_true",
+        help=(
+            "On an existing instance, wipe /workspace/patzer and reclone. "
+            "Default is in-place git update (keeps data/ and avoids re-downloading train.bin)."
+        ),
+    )
     train_p.add_argument("--disk", type=int, default=40,
                          help="Disk size in GB for new instances (default: 40)")
     train_p.add_argument("--min-gpu-ram", type=int, default=8,
