@@ -6,12 +6,10 @@
 #
 # Data: 2100+ ELO (~6.5B tokens, ~83M games — ~avg 78 tokens/game)
 #   Same as v6 (which beat v5's 1800+ data in H2H play). Data quality > quantity.
-#   Effective batch unchanged from v5/v6: gradient_accum × batch × block = 1 × 128 × 256 = 32,768
-#   tokens/iter (~198k iters/epoch if ~6.5B train tokens in memmap split).
-#   gradient_checkpointing freed enough VRAM to run batch_size=128 in a single forward
-#   (previously OOM'd without checkpointing), so accum steps dropped from 2 → 1 for
-#   the same effective batch with less Python overhead.
-#   v7 intentionally over-trains vs Chinchilla (~10 tok/param vs optimal ~20) —
+#   Effective batch: gradient_accum × batch × block = 1 × 256 × 256 = 65,536 tokens/iter.
+#   Max 300k iters → ~19.66B total tokens (same data budget as original 600k iters at batch=128).
+#   gradient_checkpointing makes batch=256 fit in 14GB (RTX 4090); on 4060 Ti use batch=128.
+#   v7 intentionally over-trains vs Chinchilla (~5 tok/param vs optimal ~20) —
 #   consistent with capacity-limited, never-overfit Patzer runs.
 #
 # Key changes from v6/v5 (116M → ~508M + schedule fixes):
@@ -19,26 +17,21 @@
 #   Architecture:
 #     n_layer: 16 → 40, n_embd: 768 → 1024
 #
-#   LR:
-#     learning_rate: 6e-4 → 4e-4  (scale down ~33% for ~3× larger model; standard practice)
-#     warmup_iters: 5k → 8k  (larger models are more sensitive to early LR spikes)
+#   LR (original v7 design; now tuned for 4090):
+#     v6→v7: 6e-4 → 4e-4  (scale down for larger model; standard practice)
+#     v7→4090: 4e-4 → 5.7e-4  (√2 scale for 2× batch size)
+#     warmup_iters: 5k → 8k  (larger models benefit from longer warmup)
 #
-#   Schedule:
-#     early_stop_min_iters: 80k → 150k
-#       80k was tuned for 116M on ~1.7B tokens (~3.4 epochs before plateau). At this scale,
-#       80k iters = only 0.34 epochs — model has barely seen the data once. Expect stable
-#       plateau at 150–250k iters; 150k gate avoids premature cooldown trigger.
-#     cooldown_iters: 50k → 65k
-#       v6's 38k was cut off mid-drop; v7-as-116M fixed to 50k. For 5× larger model
-#       with a longer stable phase (~250k), ~25% = 62k → 65k.
-#     Post-cooldown min_lr tail: auto_cooldown=True + patience stops only when val plateaus.
-#       In v5/v6 training terminated immediately when cooldown ended — v6 was still falling.
+#   Schedule (4090-tuned):
+#     max_iters: 600k → 300k  (2× batch → half iterations for same data budget)
+#     early_stop_min_iters: 150k → 75k  (25% threshold, scaled proportionally)
+#     cooldown_iters: 65k → 32k  (~25% of ~130k expected stable phase, scaled for 300k max)
+#     Post-cooldown: auto_cooldown=True + patience controls tail; no hard stop at cooldown end.
 #
-#   No regularization changes: dropout=0.0 and weight_decay=0.1 unchanged.
-#   We have never observed overfit across any run (gen gap ~0 from v4 onward). Adding
-#   regularization here would be wrong.
+#   Regularization: dropout=0.0, weight_decay=0.1 (no overfit observed across any run).
 #
-# Expected total run: stable phase ~200-250k + cooldown 65k + patience tail ~25k ≈ 290-340k iters.
+# Expected total run (4090, 3-5 days): stable ~100-125k + cooldown 32k + tail ~25k ≈ 150-170k iters;
+#   faster than 4060 Ti's ~10 days due to 3.75× GPU + 2× batch (assuming 1-1.5 sec/iter on 4090).
 #
 # GPU memory (CUDA): bf16 autocast forward + fp32 grads/Adam + activation storage for backward.
 #   Configured for RTX 4090 24GB with batch=256. Gradient checkpointing is still required
