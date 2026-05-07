@@ -1,7 +1,7 @@
-# patzer v7 — 28L / 16H / 1024d (~356M params); architecture scale-up from v5/v6 (116M).
+# patzer v7 — 40L / 16H / 1024d (~508M params); architecture scale-up from v5/v6 (116M).
 #
-# Architecture: 28L / 16H / 1024d
-#   28 × 12 × 1024² + 4214×1024 ≈ 356M params (~3.1× jump from v5/v6's 116M)
+# Architecture: 40L / 16H / 1024d
+#   40 × 12 × 1024² + 4214×1024 ≈ 508M params (~4.4× jump from v5/v6's 116M)
 #   head_dim = 64 — clean power-of-2, GPU-efficient
 #
 # Data: 2100+ ELO (~6.5B tokens, ~83M games — ~avg 78 tokens/game)
@@ -11,10 +11,10 @@
 #   v7 intentionally over-trains vs Chinchilla (~10 tok/param vs optimal ~20) —
 #   consistent with capacity-limited, never-overfit Patzer runs.
 #
-# Key changes from v6/v5 (116M → ~356M + schedule fixes):
+# Key changes from v6/v5 (116M → ~508M + schedule fixes):
 #
 #   Architecture:
-#     n_layer: 16 → 28, n_embd: 768 → 1024
+#     n_layer: 16 → 40, n_embd: 768 → 1024
 #
 #   LR:
 #     learning_rate: 6e-4 → 4e-4  (scale down ~33% for ~3× larger model; standard practice)
@@ -38,9 +38,9 @@
 # Expected total run: stable phase ~200-250k + cooldown 65k + patience tail ~25k ≈ 290-340k iters.
 #
 # GPU memory (CUDA): bf16 autocast forward + fp32 grads/Adam + activation storage for backward.
-#   The earlier 48L/1024d (~608M) variant OOM'd on an RTX 4090 24 GB even at batch=64, accum=2
-#   due to tight activation/compile overhead. This 28L (~356M) target should be far more reliable
-#   on 24 GB while keeping head_dim=64 and the same effective batch via micro-batching.
+#   On 24 GB cards, `gradient_checkpointing=True` is the main lever that makes ~500M+ models
+#   feasible at micro-batch 64. Without checkpointing, 40L/1024d can be tight or OOM depending
+#   on `torch.compile` overhead and allocator fragmentation.
 #   Keep micro-batching: batch_size=64, gradient_accumulation_steps=2 (effective batch 128).
 
 out_dir = 'checkpoints/patzer_v7'
@@ -70,8 +70,8 @@ vocab_size = 4214
 # Reduce activation memory by recomputing blocks on backward (slower, much lower VRAM).
 gradient_checkpointing = True
 
-# Model: 28L / 16H / 1024d — ~356M params
-n_layer = 28
+# Model: 40L / 16H / 1024d — ~508M params
+n_layer = 40
 n_head  = 16
 n_embd  = 1024
 bias    = False

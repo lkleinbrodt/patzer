@@ -28,6 +28,9 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **2026-05-06:** **`launch.py` — keep `data/` by default on existing instances.** `launch.py train --instance <ID>` now updates `/workspace/patzer` via in-place `git fetch/reset/clean` instead of wiping the whole workspace (so already-downloaded `data/*/train.bin` is preserved). New flag: **`--full-reset`** restores the old behavior (wipe + fresh clone).
 
+- **2026-05-06:** **`r2.py` — stronger pull integrity via metadata sidecars.** `.r2meta` sidecars now store JSON with **ETag + `size_bytes`** (reader still accepts legacy plain-ETag). `pull_file` / `pull_dir` use HEAD metadata to verify local files; if size mismatches (partial/corrupt download), they automatically re-download once. This makes large `train.bin` pulls safer and enables “skip if fresh” to be based on size even when ETag isn’t useful.
+
+- **2026-05-06:** **v7 depth swing with gradient checkpointing.** After observing low VRAM usage with **`gradient_checkpointing=True`** on the 28L fallback, v7 was moved back to **40L/1024d (~508M)** while keeping checkpointing enabled to stay within 24 GB even with `torch.compile` on.
 - **2026-05-06:** **Activation memory fix — gradient checkpointing.** Added **`GPTConfig.gradient_checkpointing`** and wrapped each transformer **`Block`** with PyTorch checkpointing when enabled (training-only), trading extra compute for much lower VRAM. Enabled it in **`train_patzer_v7.py`** to improve 24 GB reliability with `compile=True`.
 
 - **2026-05-06:** **v7 resized to ~350M params.** Updated **`train_patzer_v7.py`** from **40L/1024d (~508M)** to **28L/1024d (~356M)** (kept **16 heads** / **head_dim=64**), aiming for a GPT-2-medium-ish scale while improving 24 GB GPU fit headroom.

@@ -14,9 +14,15 @@ Usage:
   python r2.py push checkpoints/patzer_v2       # upload a checkpoint dir
   python r2.py copy src/r2/key dst/r2/key       # server-side copy [--force]
 
-pull_dir skips files that already exist locally when they match R2 (ETag sidecar),
+pull_dir skips files that already exist locally when they match R2 (metadata sidecar),
 or when R2 is unreachable (same behavior as is_fresh). Use --force to always
 re-download. Pushes write `.r2meta` sidecars after upload so freshness checks work.
+
+Sidecar format:
+  Historically `.r2meta` stored only the ETag as plain text. We now store a small JSON
+  object including `etag` and `size_bytes` (when available). The reader supports both
+  formats for backward compatibility. Size checks catch partial/corrupt downloads even
+  when ETag is missing or multipart ETags are not content MD5.
 
 The boto3 client is cached with adaptive retries on the underlying botocore session.
 
@@ -33,6 +39,7 @@ Upload design (training loop):
 
 import atexit
 import itertools
+import json
 import os
 import shutil
 import sys
@@ -379,27 +386,47 @@ def _sidecar(local_path: Path) -> Path:
     return local_path.with_suffix(local_path.suffix + ".r2meta")
 
 
-def _read_sidecar(local_path: Path) -> str | None:
+def _read_sidecar(local_path: Path) -> dict | None:
     s = _sidecar(local_path)
-    return s.read_text().strip() if s.exists() else None
+    if not s.exists():
+        return None
+    txt = s.read_text().strip()
+    if not txt:
+        return None
+    # Backward compat: old sidecars were just ETag strings.
+    if not txt.startswith("{"):
+        return {"etag": txt}
+    try:
+        obj = json.loads(txt)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
 
 
-def _write_sidecar(local_path: Path, etag: str) -> None:
-    _sidecar(local_path).write_text(etag)
+def _write_sidecar(local_path: Path, meta: dict) -> None:
+    # Keep it tiny and human readable.
+    _sidecar(local_path).write_text(json.dumps(meta, sort_keys=True))
 
 
-def _remote_etag(client, bucket: str, r2_key: str) -> str | None:
+def _remote_meta(client, bucket: str, r2_key: str) -> dict | None:
     try:
         resp = client.head_object(Bucket=bucket, Key=r2_key)
-        return resp["ETag"].strip('"')
+        etag = (resp.get("ETag") or "").strip('"')
+        size = resp.get("ContentLength")
+        out: dict[str, object] = {}
+        if etag:
+            out["etag"] = etag
+        if isinstance(size, int):
+            out["size_bytes"] = int(size)
+        return out or None
     except Exception:
         return None
 
 
 def _write_sidecar_from_remote(client, bucket: str, r2_key: str, local_path: Path) -> None:
-    etag = _remote_etag(client, bucket, r2_key)
-    if etag:
-        _write_sidecar(local_path, etag)
+    meta = _remote_meta(client, bucket, r2_key)
+    if meta:
+        _write_sidecar(local_path, meta)
 
 
 def get_etag(r2_key: str) -> str | None:
@@ -407,7 +434,11 @@ def get_etag(r2_key: str) -> str | None:
     client, bucket = _client()
     if client is None:
         return None
-    return _remote_etag(client, bucket, r2_key)
+    meta = _remote_meta(client, bucket, r2_key)
+    if not meta:
+        return None
+    et = meta.get("etag")
+    return str(et) if et else None
 
 
 def is_fresh(r2_key: str, local_path: Path) -> bool:
@@ -418,13 +449,30 @@ def is_fresh(r2_key: str, local_path: Path) -> bool:
     """
     if not local_path.exists():
         return False
-    local = _read_sidecar(local_path)
-    remote = get_etag(r2_key)
-    if remote is None:
+    local_meta = _read_sidecar(local_path) or {}
+    client, bucket = _client()
+    if client is None:
+        return True
+    remote_meta = _remote_meta(client, bucket, r2_key)
+    if remote_meta is None:
         return True   # R2 unreachable → assume fresh (offline mode)
-    if local is None:
+    if not local_meta:
         return False  # R2 online but no sidecar → re-pull to get fresh sidecar
-    return local == remote
+    # Size check catches partial/corrupt local files.
+    rsz = remote_meta.get("size_bytes")
+    if isinstance(rsz, int):
+        try:
+            lsz = local_path.stat().st_size
+        except FileNotFoundError:
+            return False
+        if lsz != rsz:
+            return False
+    let = local_meta.get("etag")
+    ret = remote_meta.get("etag")
+    if let and ret:
+        return str(let) == str(ret)
+    # If ETag is missing (rare) or sidecar is old, size match is our best check.
+    return isinstance(rsz, int)
 
 
 def list_weights(r2_prefix: str) -> list[str]:
@@ -464,6 +512,18 @@ def pull_file(r2_key: str, local_path: str | Path | None = None, *, skip_existin
     print(f"[r2] pulling {r2_key} → {local_path}")
     client.download_file(bucket, r2_key, str(local_path))
     _write_sidecar_from_remote(client, bucket, r2_key, local_path)
+    # If we got metadata but the resulting file doesn't match expected size, re-download once.
+    meta = _read_sidecar(local_path) or {}
+    rsz = meta.get("size_bytes")
+    if isinstance(rsz, int):
+        lsz = local_path.stat().st_size
+        if lsz != rsz:
+            print(
+                f"[r2] WARNING: size mismatch after download ({lsz} != {rsz}); re-downloading {r2_key}",
+                file=sys.stderr,
+            )
+            client.download_file(bucket, r2_key, str(local_path))
+            _write_sidecar_from_remote(client, bucket, r2_key, local_path)
     return True
 
 
@@ -516,6 +576,17 @@ def pull_dir(r2_prefix: str, local_dir: str | Path | None = None, *, skip_existi
             print(f"[r2] pulling {key} → {local_path}")
             client.download_file(bucket, key, str(local_path))
             _write_sidecar_from_remote(client, bucket, key, local_path)
+            meta = _read_sidecar(local_path) or {}
+            rsz = meta.get("size_bytes")
+            if isinstance(rsz, int):
+                lsz = local_path.stat().st_size
+                if lsz != rsz:
+                    print(
+                        f"[r2] WARNING: size mismatch after download ({lsz} != {rsz}); re-downloading {key}",
+                        file=sys.stderr,
+                    )
+                    client.download_file(bucket, key, str(local_path))
+                    _write_sidecar_from_remote(client, bucket, key, local_path)
             downloaded += 1
     print(f"[r2] pulled {downloaded} files, skipped {skipped} into {local_dir}")
     return downloaded > 0 or skipped > 0
