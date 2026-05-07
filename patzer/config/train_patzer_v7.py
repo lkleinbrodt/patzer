@@ -96,3 +96,21 @@ weight_decay = 1e-1
 
 device = 'auto'
 compile = True
+
+# GPU peak BF16 FLOPS for accurate MFU reporting. The reported 8% MFU against A100
+# actually means ~57% utilization on the 4060 Ti — hardware is the bottleneck, not code.
+#
+# RTX 4060 Ti (12GB): 44.12e12  ← current hardware (gradient_checkpointing required)
+# RTX 4090  (24GB):  165.2e12   ← recommended upgrade; 3.7× faster + no checkpointing needed
+# A100 SXM  (40/80): 312e12     ← even faster; Vast.ai ~$2/hr
+#
+# Estimated wall-clock to 200k iters:
+#   RTX 4060 Ti + checkpointing:  ~10 days  (~$50)
+#   RTX 4090 + no checkpointing:   ~2 days  (~$30)   [3.7× compute + 1.3× no recompute ≈ 5×]
+#   A100 SXM + no checkpointing:   ~1 day   (~$50)   [7× compute + 1.3× ≈ 9×]
+peak_flops = 44.12e12  # RTX 4060 Ti BF16 tensor-core peak (no sparsity)
+
+# Gradient checkpointing: required on 12GB GPU for 500M params. On a 24GB+ GPU:
+#   Set gradient_checkpointing = False  (saves ~30% compute from eliminated recompute)
+#   gradient_checkpoint_freq has no effect when gradient_checkpointing=False.
+gradient_checkpoint_freq = 1  # freq > 1 only useful on 16-20GB GPUs as a partial tradeoff

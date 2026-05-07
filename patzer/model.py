@@ -16,6 +16,13 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
+
+def _run_block_segment(x, *blocks):
+    """Run a sequence of transformer blocks sequentially. Used by grouped gradient checkpointing."""
+    for block in blocks:
+        x = block(x)
+    return x
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -116,6 +123,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     gradient_checkpointing: bool = False
+    gradient_checkpoint_freq: int = 1  # checkpoint every N blocks (1=every block, 2=every 2, etc.)
 
 class GPT(nn.Module):
 
@@ -179,10 +187,19 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
-            if self.config.gradient_checkpointing and self.training:
-                x = checkpoint(block, x, use_reentrant=False)
-            else:
+        if self.config.gradient_checkpointing and self.training:
+            freq = self.config.gradient_checkpoint_freq
+            blocks = list(self.transformer.h)
+            i = 0
+            while i < len(blocks):
+                segment = blocks[i:i + freq]
+                if len(segment) == 1:
+                    x = checkpoint(segment[0], x, use_reentrant=False)
+                else:
+                    x = checkpoint(_run_block_segment, x, *segment, use_reentrant=False)
+                i += freq
+        else:
+            for block in self.transformer.h:
                 x = block(x)
         x = self.transformer.ln_f(x)
 
@@ -291,20 +308,23 @@ class GPT(nn.Module):
 
         return optimizer
 
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
-        # first estimate the number of flops we do per iteration.
-        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
+    def estimate_mfu(self, fwdbwd_per_iter, dt, peak_flops=312e12):
+        """Estimate model flops utilization (MFU) as a fraction of peak_flops.
+
+        peak_flops: GPU BF16 tensor-core peak (no sparsity). Common values:
+          A100 SXM 40/80GB: 312e12  (default, original nanoGPT baseline)
+          RTX 4090:         165.2e12
+          RTX 4060 Ti:       44.12e12
+          RTX 3090:         142.6e12
+        """
         N = self.get_num_params()
         cfg = self.config
         L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
         flops_per_token = 6*N + 12*L*H*Q*T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        # express our flops throughput as ratio of A100 bfloat16 peak flops
-        flops_achieved = flops_per_iter * (1.0/dt) # per second
-        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        mfu = flops_achieved / flops_promised
+        flops_achieved = flops_per_iter / dt
+        mfu = flops_achieved / peak_flops
         return mfu
 
     @torch.no_grad()
