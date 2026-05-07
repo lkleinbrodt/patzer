@@ -48,12 +48,12 @@ eval_iters = 25                   # 25 × batch 256 = 6,400 seqs/split (same eva
 log_interval = 100
 
 always_save_checkpoint = True
-early_stop_patience_evals = 25
-early_stop_min_iters = 75000       # scaled down proportionally with max_iters (25% threshold)
-ckpt_save_interval = 20000
-weights_snapshot_interval = 20000
-ckpt_best_min_delta = 0.001
-ckpt_best_cooldown_steps = 5000
+early_stop_patience_evals = 25     # iteration-based patience (gradient steps); unchanged from 4060 Ti config
+early_stop_min_iters = 75000       # scaled proportionally with max_iters (25% threshold)
+ckpt_save_interval = 10000         # halved: 20k→10k; 4090 is faster so 20k iters = ~8h of lost work
+weights_snapshot_interval = 10000  # halved: keeps snapshot frequency equivalent by data seen (was ~655M tokens, now ~655M tokens)
+ckpt_best_min_delta = 0.001        # loss-based threshold; unchanged
+ckpt_best_cooldown_steps = 2500    # halved: equivalent R2 upload rate limit by tokens seen
 
 wandb_log = True
 wandb_project = 'patzer'
