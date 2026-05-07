@@ -1,7 +1,7 @@
-# patzer v7 — 48L / 16H / 1024d (~608M params); architecture scale-up from v5/v6 (116M).
+# patzer v7 — 40L / 16H / 1024d (~508M params); architecture scale-up from v5/v6 (116M).
 #
-# Architecture: 48L / 16H / 1024d
-#   48 × 12 × 1024² + 4214×1024 ≈ 608M params (~5.2× jump from v5/v6's 116M)
+# Architecture: 40L / 16H / 1024d
+#   40 × 12 × 1024² + 4214×1024 ≈ 508M params (~4.4× jump from v5/v6's 116M)
 #   head_dim = 64 — clean power-of-2, GPU-efficient
 #
 # Data: 2100+ ELO (~6.5B tokens, ~83M games — ~avg 78 tokens/game)
@@ -37,10 +37,10 @@
 #
 # Expected total run: stable phase ~200-250k + cooldown 65k + patience tail ~25k ≈ 290-340k iters.
 #
-# GPU memory (CUDA): bf16 autocast forward + fp32 grads/Adam + activation storage for backward;
-#   batch_size=128 OOM'd on RTX 4090 24 GB (activations dominate). Use micro-batching instead:
-#   batch_size=64, gradient_accumulation_steps=2 (same effective batch 128). Need ~23 GB —
-#   24 GB GPUs are barely enough; fragmentation can still OOM (see PyTorch expandable_segments).
+# GPU memory (CUDA): bf16 autocast forward + fp32 grads/Adam + activation storage for backward.
+#   The earlier 48L/1024d (~608M) variant OOM'd on an RTX 4090 24 GB even at batch=64, accum=2
+#   due to tight activation/compile overhead. This 40L (~508M) haircut targets reliable 24 GB runs.
+#   Keep micro-batching: batch_size=64, gradient_accumulation_steps=2 (effective batch 128).
 
 out_dir = 'checkpoints/patzer_v7'
 eval_interval = 1000
@@ -66,8 +66,8 @@ block_size = 256
 
 vocab_size = 4214
 
-# Model: 48L / 16H / 1024d — ~608M params
-n_layer = 48
+# Model: 40L / 16H / 1024d — ~508M params
+n_layer = 40
 n_head  = 16
 n_embd  = 1024
 bias    = False
