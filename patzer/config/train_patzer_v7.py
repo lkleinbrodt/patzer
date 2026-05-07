@@ -42,9 +42,9 @@
 #
 # GPU memory (CUDA): bf16 autocast forward + fp32 grads/Adam + activation storage for backward.
 #   On 24 GB cards, `gradient_checkpointing=True` is the main lever that makes ~500M+ models
-#   feasible at micro-batch 64. Without checkpointing, 40L/1024d can be tight or OOM depending
-#   on `torch.compile` overhead and allocator fragmentation.
-#   Keep micro-batching: batch_size=64, gradient_accumulation_steps=2 (effective batch 128).
+#   feasible. Without checkpointing, 40L/1024d OOM'd at batch_size=128. With checkpointing,
+#   batch_size=128 fits cleanly — accumulation steps reduced to 1 (less Python overhead,
+#   same effective batch of 32,768 tokens/iter).
 
 out_dir = 'checkpoints/patzer_v7'
 eval_interval = 1000
