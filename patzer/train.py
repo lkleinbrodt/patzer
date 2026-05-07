@@ -82,6 +82,10 @@ n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 gradient_checkpointing = False
+# Checkpoint every N transformer blocks instead of every block.
+# 1 = every block (default, minimum memory); higher values reduce recompute at the cost of more VRAM.
+# On a 24GB+ GPU with gradient_checkpointing=False this has no effect.
+gradient_checkpoint_freq = 1
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -107,6 +111,13 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+# GPU BF16 tensor-core peak FLOPS (no sparsity) for MFU calculation.
+# Set this to your actual hardware so the reported MFU % is meaningful.
+#   A100 SXM 40/80GB: 312e12  (default — original nanoGPT baseline)
+#   RTX 4090:         165.2e12
+#   RTX 4060 Ti:       44.12e12
+#   RTX 3090:         142.6e12
+peak_flops = 312e12
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str, type(None)))]
 exec(open(Path(__file__).parent / 'configurator.py').read())
@@ -188,15 +199,21 @@ evals_without_improvement = 0
 
 meta_path = os.path.join(data_dir, 'meta.json')
 meta_vocab_size = None
-if os.path.exists(meta_path):   
+if os.path.exists(meta_path):
     with open(meta_path, 'r') as f:
         meta = json.load(f)
-    meta_vocab_size = meta['vocab_size']
+    raw_vocab_size = meta['vocab_size']
+    # Round up to nearest multiple of 64 for better GPU matmul alignment.
+    # The extra token IDs are never emitted by the tokenizer; they cost negligible VRAM.
+    meta_vocab_size = ((raw_vocab_size + 63) // 64) * 64
+    if meta_vocab_size != raw_vocab_size:
+        print(f"vocab_size: {raw_vocab_size} → {meta_vocab_size} (padded to multiple of 64)")
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout,
-                  gradient_checkpointing=gradient_checkpointing) # start with model_args from command line
+                  gradient_checkpointing=gradient_checkpointing,
+                  gradient_checkpoint_freq=gradient_checkpoint_freq)
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -574,7 +591,7 @@ while True:
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt, peak_flops=peak_flops)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     iter_num += 1
