@@ -41,27 +41,22 @@
 # Expected total run: stable phase ~200-250k + cooldown 65k + patience tail ~25k ≈ 290-340k iters.
 #
 # GPU memory (CUDA): bf16 autocast forward + fp32 grads/Adam + activation storage for backward.
-#   gradient_checkpointing IS REQUIRED even on 24GB cards for this model at batch=128.
-#   Without checkpointing, activation memory alone exceeds 20GB (MLP pre-GELU tensors:
-#   40 layers × 128 × 256 × 4096 × 2 bytes = 10.2 GB; attention Q/K/V: 7.5 GB; etc.).
-#   With checkpointing, only block inputs are stored (40 × 64MB = 2.56 GB), making the
-#   full run feasible in ~9–10 GB regardless of GPU size.
+#   Configured for RTX 4090 24GB with batch=256. Gradient checkpointing is still required
+#   (activations: ~10GB MLP pre-GELU + 7.5GB Q/K/V without checkpointing; with checkpointing
+#   only 40 block inputs stored: 5.1GB). Peak VRAM usage ~14GB.
+#   Learning rate scaled by √2 (5.7e-4) for 2× batch size; max_iters halved to 300k
+#   for same data budget as original 600k at batch=128.
 #
-#   The RTX 4090 upgrade benefit is NOT eliminating checkpointing — it's that 24GB lets
-#   you double the batch size while checkpointing stays on:
-#     4060 Ti (12GB): checkpointing + batch=128 → ~9 GB used, ~10 days, ~$50
-#     4090   (24GB): checkpointing + batch=256 → ~14 GB used, ~1.3 days, ~$21
-#   The speedup comes from 3.75× faster FLOPS × 2× larger batch = ~7.5× total.
-#   Scale LR by √2 ≈ 5.7e-4 and halve max_iters when doubling batch (same data budget).
+#   On 4060 Ti (12GB): reduce batch_size to 128, learning_rate to 4e-4, max_iters to 600000.
 
 out_dir = 'checkpoints/patzer_v7'
 eval_interval = 1000
-eval_iters = 100                  # 100 × batch 64 = 6,400 seqs/split = same coverage as eval_iters=50 @ batch 128 (v5/v6)
+eval_iters = 25                   # 25 × batch 256 = 6,400 seqs/split (same eval coverage as v6)
 log_interval = 100
 
 always_save_checkpoint = True
 early_stop_patience_evals = 25
-early_stop_min_iters = 150000      # 80k too aggressive at this scale — see notes above
+early_stop_min_iters = 75000       # scaled down proportionally with max_iters (25% threshold)
 ckpt_save_interval = 20000
 weights_snapshot_interval = 20000
 ckpt_best_min_delta = 0.001
@@ -72,8 +67,8 @@ wandb_project = 'patzer'
 wandb_run_name = 'patzer_v7'
 
 dataset = 'prepared_min_elo_2100'
-gradient_accumulation_steps = 1    # single forward per step — gradient_checkpointing makes batch=128 fit on 24 GB
-batch_size = 128                   # effective batch = 1 × 128 × 256 = 32,768 tokens/iter (same as original 2×64)
+gradient_accumulation_steps = 1    # single forward per step (no accumulation needed on 4090)
+batch_size = 256                   # 4090 24GB allows 2× batch; effective batch = 1 × 256 × 256 = 65,536 tokens/iter
 block_size = 256
 
 vocab_size = 4214
@@ -90,12 +85,12 @@ dropout = 0.0                      # no regularization needed; we have never ove
 
 # WSD + auto_cooldown
 lr_schedule = 'wsd'
-learning_rate = 4e-4               # scaled down from 6e-4 for 5× larger model
-max_iters = 600000
+learning_rate = 5.7e-4             # 4e-4 × √2 scaling rule for 2× batch size (4090 with batch=256)
+max_iters = 300000                 # halved to match data budget (2× batch → same tokens per iter, so half the iters)
 min_lr = 5e-6
-warmup_iters = 8000                # up from 5k; larger model benefits from longer warmup
+warmup_iters = 8000                # unchanged (same number of iters as before; proportionally shorter due to larger batch)
 cooldown_start_iter = None
-cooldown_iters = 65000             # ~25% of expected ~250k stable phase; v6 was cut off at 38k
+cooldown_iters = 32000             # ~25% of expected ~130k stable phase (scaled down from 65k for max_iters 300k)
 auto_cooldown = True               # triggers cooldown on plateau, then runs min_lr tail w/ patience
 
 beta1 = 0.9
@@ -105,13 +100,11 @@ weight_decay = 1e-1
 device = 'auto'
 compile = True
 
-# GPU peak BF16 FLOPS for accurate MFU reporting. The reported 8% MFU against A100
-# actually means ~57% utilization on the 4060 Ti — hardware is the bottleneck, not code.
-#
-# RTX 4060 Ti (12GB): 44.12e12  ← current hardware
-# RTX 4090  (24GB):  165.2e12   ← recommended upgrade (batch=256 + checkpointing)
-# A100 SXM  (40/80): 312e12     ← largest speedup; Vast.ai ~$2/hr
-peak_flops = 44.12e12  # RTX 4060 Ti BF16 tensor-core peak (no sparsity)
+# GPU peak BF16 FLOPS for accurate MFU reporting.
+# This config is tuned for RTX 4090 (24GB). For other GPUs:
+#   RTX 4060 Ti (12GB): batch_size=128, learning_rate=4e-4, max_iters=600000, peak_flops=44.12e12
+#   A100 SXM (40/80GB): batch_size=512+, learning_rate=8e-4+, peak_flops=312e12
+peak_flops = 165.2e12  # RTX 4090 BF16 tensor-core peak (no sparsity)
 
 # Gradient checkpointing is always needed for this model size. freq=1 checkpoints every
 # block (minimum VRAM). On a 24GB GPU, bump batch_size to 256 instead of disabling.
