@@ -21,9 +21,9 @@ re-download. Pushes write `.r2meta` sidecars after upload so freshness checks wo
 The boto3 client is cached with adaptive retries on the underlying botocore session.
 
 Upload design (training loop):
-  * All uploads use **put_object** (single HTTP request per file). We avoid
-    ``upload_file`` / S3Transfer — it spawns its own thread pool and breaks in
-    atexit / interpreter shutdown ordering.
+  * Small/medium uploads use **put_object** (single HTTP request). Larger files
+    use **multipart** uploads (serial ``upload_part`` calls — no S3Transfer /
+    nested thread pools). Threshold defaults below the typical 5 GiB single-PUT cap.
   * ``push_async`` uses one background worker so large checkpoint uploads do not
     block GPU steps for minutes, but ``flush_r2_uploads()`` drains the queue on
     normal training exit and from atexit so R2 does not lag arbitrarily behind.
@@ -59,6 +59,86 @@ _WARN_QUEUE_DEPTH = 5
 
 _client_lock = threading.Lock()
 _client_cache: tuple[object, str] | None = None
+
+# Single PutObject bodies are limited (S3/R2: 5 GiB). Multipart parts must be
+# ≥ 5 MiB except the last. Threshold/part size env vars are read in ``_upload_one_file``
+# after ``_client()`` runs ``load_dotenv()``.
+_MP_MIN_PART = 5 * 1024 * 1024
+
+
+def _upload_one_file(client, bucket: str, r2_key: str, local_path: Path, *, quiet: bool) -> dict:
+    """Upload ``local_path``; return boto response dict with ``ETag`` if present."""
+    threshold = int(
+        os.environ.get("R2_SINGLE_PUT_THRESHOLD_BYTES", str(4 * 1024 * 1024 * 1024))
+    )
+    part_max = max(
+        int(os.environ.get("R2_MULTIPART_PART_BYTES", str(64 * 1024 * 1024))),
+        _MP_MIN_PART,
+    )
+
+    size = local_path.stat().st_size
+    if size <= threshold:
+        with open(local_path, "rb") as f:
+            return client.put_object(Bucket=bucket, Key=r2_key, Body=f)
+
+    resp = client.create_multipart_upload(Bucket=bucket, Key=r2_key)
+    upload_id = resp["UploadId"]
+    parts: list[dict] = []
+    try:
+        with open(local_path, "rb") as f:
+            part_num = 1
+            bytes_done = 0
+            next_log = max(size // 10, part_max)
+            milestone = next_log
+            remaining = size
+
+            while remaining > 0:
+                if remaining <= part_max:
+                    to_read = remaining
+                else:
+                    to_read = part_max
+                    tail = remaining - to_read
+                    if 0 < tail < _MP_MIN_PART:
+                        to_read = remaining - _MP_MIN_PART
+
+                chunk = f.read(to_read)
+                if len(chunk) != to_read:
+                    raise RuntimeError(
+                        f"short read uploading {local_path}: got {len(chunk)} bytes, expected {to_read}"
+                    )
+
+                up = client.upload_part(
+                    Bucket=bucket,
+                    Key=r2_key,
+                    PartNumber=part_num,
+                    UploadId=upload_id,
+                    Body=chunk,
+                )
+                parts.append({"ETag": up["ETag"], "PartNumber": part_num})
+                part_num += 1
+                bytes_done += len(chunk)
+                remaining -= len(chunk)
+
+                if not quiet and size and bytes_done >= milestone:
+                    pct = min(100, 100 * bytes_done / size)
+                    print(f"[r2] multipart {r2_key} {pct:.0f}% ({bytes_done}/{size} bytes)")
+                    milestone = min(bytes_done + next_log, size)
+
+        if not parts:
+            raise RuntimeError(f"multipart upload produced no parts: {local_path}")
+
+        return client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=r2_key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": sorted(parts, key=lambda p: p["PartNumber"])},
+        )
+    except BaseException:
+        try:
+            client.abort_multipart_upload(Bucket=bucket, Key=r2_key, UploadId=upload_id)
+        except Exception:
+            pass
+        raise
 
 
 def _client():
@@ -104,8 +184,7 @@ def push_file(local_path: str | Path, r2_key: str | None = None) -> bool:
     if r2_key is None:
         r2_key = str(local_path)
     print(f"[r2] pushing {local_path} → {r2_key}")
-    with open(local_path, "rb") as f:
-        resp = client.put_object(Bucket=bucket, Key=r2_key, Body=f)
+    resp = _upload_one_file(client, bucket, r2_key, local_path, quiet=False)
     etag = (resp.get("ETag") or "").strip('"')
     if etag:
         _write_sidecar(local_path, etag)
@@ -117,7 +196,7 @@ def push_file(local_path: str | Path, r2_key: str | None = None) -> bool:
 def push_file_threadsafe(local_path: str | Path, r2_key: str | None = None) -> bool:
     """Same as ``push_file`` — kept as an explicit name for atexit / signal handlers.
 
-    Uses ``put_object`` only (no S3Transfer thread pool).
+    Uses the same upload path as ``push_file`` (single PUT under threshold, multipart above).
     """
     return push_file(local_path, r2_key)
 
@@ -157,7 +236,7 @@ def push_async(
     used for creating weights_iter_*.pt snapshots safely: the copy must happen
     after the new weights are live on R2, not before.
 
-    Uses ``put_object`` only (no ``upload_file`` / S3Transfer thread pool).
+    Uses the same multipart-aware upload path as ``push_file`` (no ``upload_file`` / S3Transfer).
 
     Uploads are serialised (max_workers=1). If ``submit`` fails, uploads
     synchronously in the foreground instead of dropping the work.
@@ -181,8 +260,7 @@ def push_async(
     def _work_inner() -> None:
         try:
             print(f"[r2] pushing {local_path} → {r2_key} (async)")
-            with open(tmp, "rb") as f:
-                client.put_object(Bucket=bucket, Key=r2_key, Body=f)
+            _upload_one_file(client, bucket, r2_key, tmp, quiet=False)
             if then_copy_to:
                 copy_object(r2_key, then_copy_to, overwrite=False)
         except Exception as exc:
