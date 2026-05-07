@@ -4,11 +4,12 @@
 #   48 × 12 × 1024² + 4214×1024 ≈ 608M params (~5.2× jump from v5/v6's 116M)
 #   head_dim = 64 — clean power-of-2, GPU-efficient
 #
-# Data: 2100+ ELO (~7.8B train tokens, ~100M games)
+# Data: 2100+ ELO (~6.5B tokens, ~83M games — ~avg 78 tokens/game)
 #   Same as v6 (which beat v5's 1800+ data in H2H play). Data quality > quantity.
-#   Tokens/iter: 128 × 256 = 32,768 → ~238k iters/epoch on 2100+ train split.
-#   v7 intentionally over-trains relative to Chinchilla (~13 tok/param vs optimal ~20) —
-#   consistent with our entire history of capacity-limited, never-overfit models.
+#   Effective batch unchanged from v5/v6: gradient_accum × batch × block = 2 × 64 × 256 = 32,768
+#   tokens/iter (~198k iters/epoch if ~6.5B train tokens in memmap split).
+#   v7 intentionally over-trains vs Chinchilla (~10 tok/param vs optimal ~20) —
+#   consistent with capacity-limited, never-overfit Patzer runs.
 #
 # Key changes from v6/v5 (116M → 608M + schedule fixes):
 #
@@ -36,13 +37,14 @@
 #
 # Expected total run: stable phase ~200-250k + cooldown 65k + patience tail ~25k ≈ 290-340k iters.
 #
-# GPU memory: 608M fp32 weights + Adam states + activations at batch=128 requires ~18-22 GB.
-#   Rent a 24 GB GPU (RTX 4090, A5000, A6000) on Vast.ai.
-#   16 GB fallback: set batch_size=64, gradient_accumulation_steps=2 (same effective batch).
+# GPU memory (CUDA): bf16 autocast forward + fp32 grads/Adam + activation storage for backward;
+#   batch_size=128 OOM'd on RTX 4090 24 GB (activations dominate). Use micro-batching instead:
+#   batch_size=64, gradient_accumulation_steps=2 (same effective batch 128). Need ~23 GB —
+#   24 GB GPUs are barely enough; fragmentation can still OOM (see PyTorch expandable_segments).
 
 out_dir = 'checkpoints/patzer_v7'
 eval_interval = 1000
-eval_iters = 50
+eval_iters = 100                  # 100 × batch 64 = 6,400 seqs/split = same coverage as eval_iters=50 @ batch 128 (v5/v6)
 log_interval = 100
 
 always_save_checkpoint = True
@@ -58,8 +60,8 @@ wandb_project = 'patzer'
 wandb_run_name = 'patzer_v7'
 
 dataset = 'prepared_min_elo_2100'
-gradient_accumulation_steps = 1    # set to 2 and halve batch_size if 24 GB GPU not available
-batch_size = 128
+gradient_accumulation_steps = 2    # micro-batch — full batch_size=128 OOM'd on 24 GB RTX 4090
+batch_size = 64                    # physical micro-batch per forward; effective batch_size remains 128
 block_size = 256
 
 vocab_size = 4214
