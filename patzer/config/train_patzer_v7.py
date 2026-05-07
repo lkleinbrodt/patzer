@@ -41,10 +41,18 @@
 # Expected total run: stable phase ~200-250k + cooldown 65k + patience tail ~25k ≈ 290-340k iters.
 #
 # GPU memory (CUDA): bf16 autocast forward + fp32 grads/Adam + activation storage for backward.
-#   On 24 GB cards, `gradient_checkpointing=True` is the main lever that makes ~500M+ models
-#   feasible. Without checkpointing, 40L/1024d OOM'd at batch_size=128. With checkpointing,
-#   batch_size=128 fits cleanly — accumulation steps reduced to 1 (less Python overhead,
-#   same effective batch of 32,768 tokens/iter).
+#   gradient_checkpointing IS REQUIRED even on 24GB cards for this model at batch=128.
+#   Without checkpointing, activation memory alone exceeds 20GB (MLP pre-GELU tensors:
+#   40 layers × 128 × 256 × 4096 × 2 bytes = 10.2 GB; attention Q/K/V: 7.5 GB; etc.).
+#   With checkpointing, only block inputs are stored (40 × 64MB = 2.56 GB), making the
+#   full run feasible in ~9–10 GB regardless of GPU size.
+#
+#   The RTX 4090 upgrade benefit is NOT eliminating checkpointing — it's that 24GB lets
+#   you double the batch size while checkpointing stays on:
+#     4060 Ti (12GB): checkpointing + batch=128 → ~9 GB used, ~10 days, ~$50
+#     4090   (24GB): checkpointing + batch=256 → ~14 GB used, ~1.3 days, ~$21
+#   The speedup comes from 3.75× faster FLOPS × 2× larger batch = ~7.5× total.
+#   Scale LR by √2 ≈ 5.7e-4 and halve max_iters when doubling batch (same data budget).
 
 out_dir = 'checkpoints/patzer_v7'
 eval_interval = 1000
@@ -100,17 +108,11 @@ compile = True
 # GPU peak BF16 FLOPS for accurate MFU reporting. The reported 8% MFU against A100
 # actually means ~57% utilization on the 4060 Ti — hardware is the bottleneck, not code.
 #
-# RTX 4060 Ti (12GB): 44.12e12  ← current hardware (gradient_checkpointing required)
-# RTX 4090  (24GB):  165.2e12   ← recommended upgrade; 3.7× faster + no checkpointing needed
-# A100 SXM  (40/80): 312e12     ← even faster; Vast.ai ~$2/hr
-#
-# Estimated wall-clock to 200k iters:
-#   RTX 4060 Ti + checkpointing:  ~10 days  (~$50)
-#   RTX 4090 + no checkpointing:   ~2 days  (~$30)   [3.7× compute + 1.3× no recompute ≈ 5×]
-#   A100 SXM + no checkpointing:   ~1 day   (~$50)   [7× compute + 1.3× ≈ 9×]
+# RTX 4060 Ti (12GB): 44.12e12  ← current hardware
+# RTX 4090  (24GB):  165.2e12   ← recommended upgrade (batch=256 + checkpointing)
+# A100 SXM  (40/80): 312e12     ← largest speedup; Vast.ai ~$2/hr
 peak_flops = 44.12e12  # RTX 4060 Ti BF16 tensor-core peak (no sparsity)
 
-# Gradient checkpointing: required on 12GB GPU for 500M params. On a 24GB+ GPU:
-#   Set gradient_checkpointing = False  (saves ~30% compute from eliminated recompute)
-#   gradient_checkpoint_freq has no effect when gradient_checkpointing=False.
-gradient_checkpoint_freq = 1  # freq > 1 only useful on 16-20GB GPUs as a partial tradeoff
+# Gradient checkpointing is always needed for this model size. freq=1 checkpoints every
+# block (minimum VRAM). On a 24GB GPU, bump batch_size to 256 instead of disabling.
+gradient_checkpoint_freq = 1
