@@ -64,6 +64,7 @@ _client_cache: tuple[object, str] | None = None
 # ≥ 5 MiB except the last. Threshold/part size env vars are read in ``_upload_one_file``
 # after ``_client()`` runs ``load_dotenv()``.
 _MP_MIN_PART = 5 * 1024 * 1024
+_LARGE_SINGLE_PUT_NOTE = 100 * 1024 * 1024  # log once: single PUT has no incremental progress
 
 
 def _upload_one_file(client, bucket: str, r2_key: str, local_path: Path, *, quiet: bool) -> dict:
@@ -78,8 +79,21 @@ def _upload_one_file(client, bucket: str, r2_key: str, local_path: Path, *, quie
 
     size = local_path.stat().st_size
     if size <= threshold:
+        if not quiet and size >= _LARGE_SINGLE_PUT_NOTE:
+            print(
+                f"[r2] put_object {r2_key} ({size} bytes — single request, waits until upload finishes)",
+                flush=True,
+            )
         with open(local_path, "rb") as f:
             return client.put_object(Bucket=bucket, Key=r2_key, Body=f)
+
+    est_parts = max(1, (size + part_max - 1) // part_max)
+    log_every = max(1, est_parts // 25)  # ~25 progress lines over the whole upload
+    if not quiet:
+        print(
+            f"[r2] multipart {r2_key} starting ({size} bytes, ~{est_parts} parts @ ≤{part_max // (1024 * 1024)} MiB)",
+            flush=True,
+        )
 
     resp = client.create_multipart_upload(Bucket=bucket, Key=r2_key)
     upload_id = resp["UploadId"]
@@ -88,8 +102,6 @@ def _upload_one_file(client, bucket: str, r2_key: str, local_path: Path, *, quie
         with open(local_path, "rb") as f:
             part_num = 1
             bytes_done = 0
-            next_log = max(size // 10, part_max)
-            milestone = next_log
             remaining = size
 
             while remaining > 0:
@@ -119,10 +131,18 @@ def _upload_one_file(client, bucket: str, r2_key: str, local_path: Path, *, quie
                 bytes_done += len(chunk)
                 remaining -= len(chunk)
 
-                if not quiet and size and bytes_done >= milestone:
+                done_parts = len(parts)
+                if not quiet and (
+                    done_parts == 1
+                    or done_parts % log_every == 0
+                    or remaining == 0
+                ):
                     pct = min(100, 100 * bytes_done / size)
-                    print(f"[r2] multipart {r2_key} {pct:.0f}% ({bytes_done}/{size} bytes)")
-                    milestone = min(bytes_done + next_log, size)
+                    print(
+                        f"[r2] multipart {r2_key} {pct:.0f}% "
+                        f"(part {done_parts}/{est_parts}+, {bytes_done}/{size} bytes)",
+                        flush=True,
+                    )
 
         if not parts:
             raise RuntimeError(f"multipart upload produced no parts: {local_path}")
@@ -183,7 +203,7 @@ def push_file(local_path: str | Path, r2_key: str | None = None) -> bool:
     local_path = Path(local_path)
     if r2_key is None:
         r2_key = str(local_path)
-    print(f"[r2] pushing {local_path} → {r2_key}")
+    print(f"[r2] pushing {local_path} → {r2_key}", flush=True)
     resp = _upload_one_file(client, bucket, r2_key, local_path, quiet=False)
     etag = (resp.get("ETag") or "").strip('"')
     if etag:
@@ -259,7 +279,7 @@ def push_async(
 
     def _work_inner() -> None:
         try:
-            print(f"[r2] pushing {local_path} → {r2_key} (async)")
+            print(f"[r2] pushing {local_path} → {r2_key} (async)", flush=True)
             _upload_one_file(client, bucket, r2_key, tmp, quiet=False)
             if then_copy_to:
                 copy_object(r2_key, then_copy_to, overwrite=False)
