@@ -26,6 +26,10 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **2026-05-06:** **v7 haircut after 24 GB OOM.** The **48L/1024d (~608M)** v7 variant still OOM’d on an **RTX 4090 24 GB** (Inductor/compile overhead + tight activation budget). Switched to a smaller **40L/1024d (~508M)** model to fit reliably on 24 GB while keeping 2100+ data and the same effective batch (micro-batch **64×2**).
 
+- **2026-05-06:** **Activation memory fix — gradient checkpointing.** Added **`GPTConfig.gradient_checkpointing`** and wrapped each transformer **`Block`** with PyTorch checkpointing when enabled (training-only), trading extra compute for much lower VRAM. Enabled it in **`train_patzer_v7.py`** to improve 24 GB reliability with `compile=True`.
+
+- **2026-05-06:** **v7 resized to ~350M params.** Updated **`train_patzer_v7.py`** from **40L/1024d (~508M)** to **28L/1024d (~356M)** (kept **16 heads** / **head_dim=64**), aiming for a GPT-2-medium-ish scale while improving 24 GB GPU fit headroom.
+
 - **2026-05-06:** **v6 post-cooldown continuation plan.** v6 used **WSD + `auto_cooldown=True`** and terminated after completing the linear decay to **`min_lr`**. If val loss is still improving at the end of cooldown, the practical continuation is a **new phase** resumed from `ckpt.pt` but **with a fresh LR policy** (e.g. hold a moderate constant LR by setting `decay_lr=False`, or switch schedules) rather than extending training at `min_lr` indefinitely.
 
 - **2026-05-06:** **ELO cutoff counting now matches `prepare.py --min-elo`.** **`pipeline/count_games_txt.py`** gained **`--min-elo-distribution`** to count games by **min(WhiteElo, BlackElo) >= cutoff** (both players >= cutoff), using **`min_elo_histogram`** from sibling **`games_*.stats.json`** when present (fast) and falling back to scanning text dumps otherwise. **`pipeline/parse_pgn.py`** now writes that `min_elo_histogram` alongside the existing average-ELO histogram for future months.
