@@ -6,8 +6,11 @@
 #
 # Data: 2100+ ELO (~6.5B tokens, ~83M games — ~avg 78 tokens/game)
 #   Same as v6 (which beat v5's 1800+ data in H2H play). Data quality > quantity.
-#   Effective batch unchanged from v5/v6: gradient_accum × batch × block = 2 × 64 × 256 = 32,768
+#   Effective batch unchanged from v5/v6: gradient_accum × batch × block = 1 × 128 × 256 = 32,768
 #   tokens/iter (~198k iters/epoch if ~6.5B train tokens in memmap split).
+#   gradient_checkpointing freed enough VRAM to run batch_size=128 in a single forward
+#   (previously OOM'd without checkpointing), so accum steps dropped from 2 → 1 for
+#   the same effective batch with less Python overhead.
 #   v7 intentionally over-trains vs Chinchilla (~10 tok/param vs optimal ~20) —
 #   consistent with capacity-limited, never-overfit Patzer runs.
 #
@@ -61,8 +64,8 @@ wandb_project = 'patzer'
 wandb_run_name = 'patzer_v7'
 
 dataset = 'prepared_min_elo_2100'
-gradient_accumulation_steps = 2    # micro-batch — full batch_size=128 OOM'd on 24 GB RTX 4090
-batch_size = 64                    # physical micro-batch per forward; effective batch_size remains 128
+gradient_accumulation_steps = 1    # single forward per step — gradient_checkpointing makes batch=128 fit on 24 GB
+batch_size = 128                   # effective batch = 1 × 128 × 256 = 32,768 tokens/iter (same as original 2×64)
 block_size = 256
 
 vocab_size = 4214
