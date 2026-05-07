@@ -37,10 +37,48 @@ import os
 import shutil
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from botocore.config import Config
+
+
+def _fmt_bytes(n: int) -> str:
+    x = float(n)
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    i = 0
+    while x >= 1024 and i < len(units) - 1:
+        x /= 1024.0
+        i += 1
+    if i == 0:
+        return f"{int(n)} B"
+    s = f"{x:.2f}".rstrip("0").rstrip(".")
+    return f"{s} {units[i]}"
+
+
+def _fmt_eta(sec: float) -> str:
+    if sec <= 0 or sec > 1e7:
+        return "—"
+    if sec < 90:
+        return f"~{max(1, int(sec))}s"
+    if sec < 5400:
+        return f"~{int(sec // 60)}m"
+    h = sec / 3600.0
+    return f"~{h:.1f}h".replace(".0h", "h")
+
+
+def _short_key(key: str, max_len: int = 52) -> str:
+    if len(key) <= max_len:
+        return key
+    p = Path(key)
+    parts = p.parts
+    if len(parts) >= 2:
+        tail = f"{parts[-2]}/{parts[-1]}"
+        if len(tail) <= max_len - 1:
+            return f"…/{tail}"
+    return f"…{key[-(max_len - 1):]}"
+
 
 # Single-worker executor: uploads queue up and never run concurrently, so
 # there's no risk of two in-flight uploads stomping each other on R2.
@@ -78,10 +116,11 @@ def _upload_one_file(client, bucket: str, r2_key: str, local_path: Path, *, quie
     )
 
     size = local_path.stat().st_size
+    sk = _short_key(r2_key)
     if size <= threshold:
         if not quiet and size >= _LARGE_SINGLE_PUT_NOTE:
             print(
-                f"[r2] put_object {r2_key} ({size} bytes — single request, waits until upload finishes)",
+                f"[r2] · {sk} · {_fmt_bytes(size)} · one PUT (no partial progress)",
                 flush=True,
             )
         with open(local_path, "rb") as f:
@@ -89,9 +128,10 @@ def _upload_one_file(client, bucket: str, r2_key: str, local_path: Path, *, quie
 
     est_parts = max(1, (size + part_max - 1) // part_max)
     log_every = max(1, est_parts // 25)  # ~25 progress lines over the whole upload
+    part_mib = part_max // (1024 * 1024)
     if not quiet:
         print(
-            f"[r2] multipart {r2_key} starting ({size} bytes, ~{est_parts} parts @ ≤{part_max // (1024 * 1024)} MiB)",
+            f"[r2] · {sk} · multipart · {_fmt_bytes(size)} · ~{est_parts} parts × {part_mib} MiB",
             flush=True,
         )
 
@@ -99,6 +139,7 @@ def _upload_one_file(client, bucket: str, r2_key: str, local_path: Path, *, quie
     upload_id = resp["UploadId"]
     parts: list[dict] = []
     try:
+        t0 = time.monotonic()
         with open(local_path, "rb") as f:
             part_num = 1
             bytes_done = 0
@@ -138,9 +179,22 @@ def _upload_one_file(client, bucket: str, r2_key: str, local_path: Path, *, quie
                     or remaining == 0
                 ):
                     pct = min(100, 100 * bytes_done / size)
+                    elapsed = time.monotonic() - t0
+                    mib_s = (
+                        f"{bytes_done / elapsed / (1024 * 1024):.1f} MiB/s"
+                        if elapsed > 0.25
+                        else "—"
+                    )
+                    if remaining == 0:
+                        eta_s = "done"
+                    elif elapsed > 0.5 and bytes_done > 0:
+                        eta_s = _fmt_eta((size - bytes_done) / (bytes_done / elapsed))
+                    else:
+                        eta_s = "…"
                     print(
-                        f"[r2] multipart {r2_key} {pct:.0f}% "
-                        f"(part {done_parts}/{est_parts}+, {bytes_done}/{size} bytes)",
+                        f"[r2] · {sk} · {pct:3.0f}% · "
+                        f"{_fmt_bytes(bytes_done)}/{_fmt_bytes(size)} · "
+                        f"parts {done_parts}/~{est_parts} · {mib_s} · ETA {eta_s}",
                         flush=True,
                     )
 
