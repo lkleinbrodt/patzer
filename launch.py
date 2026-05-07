@@ -192,8 +192,11 @@ trap _on_exit EXIT"""
         f"rm -rf {WORKSPACE}" if wipe else "",
         (
             # Fresh clone if missing OR after wipe. Otherwise in-place update.
+            # NOTE: `git clean` deletes untracked AND gitignored files, so we must explicitly
+            # keep `patzer/data/` by default (large memmap binaries live there).
             f"if [ -d '{WORKSPACE}/.git' ]; then "
-            f"cd {WORKSPACE} && git fetch --all --prune && git reset --hard origin/main && git clean -fd; "
+            f"cd {WORKSPACE} && git fetch --all --prune && git reset --hard origin/main && "
+            f"git clean -fd -e patzer/data; "
             f"else git clone {GITHUB_REPO} {WORKSPACE}; fi"
         ),
         f"cd {WORKSPACE}",
