@@ -23,7 +23,7 @@ Across families, v4’s best sits about **~200** above v2’s best and **~400** 
 
 **v3 — mostly yes (in the logged band).** Checkpoints `@40` → `@80` → `@111` → `@145` → `@180` show **strictly increasing** Elo (1373 → 1476 → 1530 → 1569 → 1579). The early `**@10`** bucket is an exception (1124 ± 21, fewer games, wide σ): it behaves like an under-trained snapshot rather than a step in the same curve. Interpreting “later is better” should start from `@40` onward, where the trend is clean.
 
-**v2 — no.** Elo is **not monotonic** in training step. Ordering by `k`: `@50` is weakest (~~1195); **`@120` (~~1302) beats `@180` (~~1289)** by a clear margin; `@220` (~~1384) still trails `@120`. The best two entries are the latest large-step snapshots, `**@274`** and `**@288**` (~1389–1402). So the run had a **mid-training regression** (roughly 120k–220k) versus the ~120k checkpoint, then recovery and a late peak. That is exactly the regime where val-loss–based “best weights” and multi-snapshot evals matter: “last iter” or a single mid-run save would mis-rank strength.
+**v2 — no.** Elo is **not monotonic** in training step. Ordering by `k`: `@50` is weakest (~~1195); **`@120` (~~1302) beats `@180` (~~1289)** by a clear margin; `@220` (~~1384) still trails `@120`. The best two entries are the latest large-step snapshots, `**@274`** and `**@288`** (~1389–1402). So the run had a **mid-training regression** (roughly 120k–220k) versus the ~120k checkpoint, then recovery and a late peak. That is exactly the regime where val-loss–based “best weights” and multi-snapshot evals matter: “last iter” or a single mid-run save would mis-rank strength.
 
 **v4 — yes among logged steps.** `@40` → `@81` → `@104` → `@201` rise monotonically (1361 → 1403 → 1416 → 1600). Mid-run `@104` still trails **v3 `@111`** (1530) on the same ladder — extra data does not guarantee dominance at equal *optimizer* step vs the older run’s snapshot curve.
 
@@ -51,18 +51,18 @@ Across families, v4’s best sits about **~200** above v2’s best and **~400** 
 ### Training
 
 
-| param            | value                             |
-| ---------------- | --------------------------------- |
-| data             | ~80M tokens, 1800+ ELO, ~1M games |
-| batch_size       | 128 (32 × 4 accum)                |
-| max_iters        | 40,000                            |
-| lr               | 1e-3 → 1e-4 (cosine)              |
+| param            | value                                               |
+| ---------------- | --------------------------------------------------- |
+| data             | ~80M tokens, 1800+ ELO, ~1M games                   |
+| batch_size       | 128 (32 × 4 accum)                                  |
+| max_iters        | 40,000                                              |
+| lr               | 1e-3 → 1e-4 (cosine)                                |
 | val loss (best)  | **1.841** at iter **39k** (`metrics.jsonl` from R2) |
 | val loss (final) | **1.843** at iter **40k**                           |
-| hardware         | Vast.ai (GPU unrecorded)                              |
-| step time        | unrecorded                                            |
-| throughput       | unrecorded                                            |
-| eval time        | unrecorded                                            |
+| hardware         | Vast.ai (GPU unrecorded)                            |
+| step time        | unrecorded                                          |
+| throughput       | unrecorded                                          |
+| eval time        | unrecorded                                          |
 
 
 **Note:** Val loss was still improving into the late 30k band; **best val at iter 39k** (final row 40k is slightly worse). Underfit at LR floor 1e-4.
@@ -101,17 +101,17 @@ Across families, v4’s best sits about **~200** above v2’s best and **~400** 
 ### Training
 
 
-| param      | value                                                    |
-| ---------- | -------------------------------------------------------- |
-| data       | ~868M train tokens, 1800+ ELO, ~11.15M games             |
-| batch_size | 128 (32 × 4 accum)                                       |
-| max_iters  | 150,000 (was still learning; later resumed toward 250k)  |
-| lr         | 1e-3 → 1e-5 (cosine)                                     |
-| val loss (best) | **1.650** at iter **288k** (`metrics.jsonl` from R2) |
-| hardware   | RTX 3060                                                 |
-| step time  | ~155 ms/step                                             |
-| throughput | ~211k tokens/sec                                         |
-| eval time  | ~6,280 ms (200 iters × batch 32 × 2 splits = 12.8k seqs) |
+| param           | value                                                    |
+| --------------- | -------------------------------------------------------- |
+| data            | ~868M train tokens, 1800+ ELO, ~11.15M games             |
+| batch_size      | 128 (32 × 4 accum)                                       |
+| max_iters       | 150,000 (was still learning; later resumed toward 250k)  |
+| lr              | 1e-3 → 1e-5 (cosine)                                     |
+| val loss (best) | **1.650** at iter **288k** (`metrics.jsonl` from R2)     |
+| hardware        | RTX 3060                                                 |
+| step time       | ~155 ms/step                                             |
+| throughput      | ~211k tokens/sec                                         |
+| eval time       | ~6,280 ms (200 iters × batch 32 × 2 splits = 12.8k seqs) |
 
 
 ### Eval (unified ladder)
@@ -141,18 +141,18 @@ See **Unified eval insights** — peak `**patzer_v2@288`** / `**@274`** (~1402 /
 ### Training
 
 
-| param           | value                                                      |
-| --------------- | ---------------------------------------------------------- |
-| data            | ~868M train tokens, 1800+ ELO, ~11.15M games               |
-| batch_size      | 128 (32 × 4 accum)                                         |
-| max_iters       | 150,000                                                    |
-| lr              | 6e-4 → 1e-5 (cosine)                                       |
+| param           | value                                                                    |
+| --------------- | ------------------------------------------------------------------------ |
+| data            | ~868M train tokens, 1800+ ELO, ~11.15M games                             |
+| batch_size      | 128 (32 × 4 accum)                                                       |
+| max_iters       | 150,000                                                                  |
+| lr              | 6e-4 → 1e-5 (cosine)                                                     |
 | val loss (best) | **1.510** at iter **180k** (`metrics.jsonl` from R2; 145k was **1.514**) |
-| gen gap         | +0.025 (first overfitting signal in any run)               |
-| hardware        | RTX 3060 (phase 1) / RTX 4060 Ti (phase 2)                 |
-| step time       | ~470 ms/step (3060) · ~321 ms/step (4060 Ti)               |
-| throughput      | ~70k tokens/sec (3060) · ~102k tokens/sec (4060 Ti)        |
-| eval time       | ~32,000 ms (3060) · ~34,000 ms (4060 Ti); includes R2 sync |
+| gen gap         | +0.025 (first overfitting signal in any run)                             |
+| hardware        | RTX 3060 (phase 1) / RTX 4060 Ti (phase 2)                               |
+| step time       | ~470 ms/step (3060) · ~321 ms/step (4060 Ti)                             |
+| throughput      | ~70k tokens/sec (3060) · ~102k tokens/sec (4060 Ti)                      |
+| eval time       | ~32,000 ms (3060) · ~34,000 ms (4060 Ti); includes R2 sync               |
 
 
 ### Eval (unified ladder)
@@ -242,7 +242,7 @@ Full table: `python eval/evaluate.py leaderboard`. v4 rows in the May 2026 DB sn
 | `patzer_v4@40`  | 1361 ± 15 | 602   |
 
 
-`@201` is the **best-val** step and matches `**weights_best.pt*`* for play/eval (training ended ~203k without beating 201k). **H2H-only rank** matches overall rank (#1) for `@201` in that snapshot — not true for every checkpoint in every DB.
+`@201` is the **best-val** step and matches `**weights_best.pt`** for play/eval (training ended ~203k without beating 201k). **H2H-only rank** matches overall rank (#1) for `@201` in that snapshot — not true for every checkpoint in every DB.
 
 ### Changes from v3
 
@@ -279,16 +279,121 @@ Per-iter val-loss progress across phases:
 
 ---
 
+## v5 — ~116M model, same data as v4 (1800+), WSD auto-cooldown
+
+**Checkpoint:** `checkpoints/patzer_v5`  
+**Config:** `patzer/config/train_patzer_v5.py`  
+**Trained:** May 2026 (Vast.ai; instance terminated after completion)
+
+### Architecture
+
+
+| param      | value |
+| ---------- | ----- |
+| n_layer    | 16    |
+| n_head     | 16    |
+| n_embd     | 768   |
+| block_size | 256   |
+| params     | ~116M |
+
+
+### Training
+
+
+| param            | value                                           |
+| ---------------- | ----------------------------------------------- |
+| data             | ~2.85B train tokens, **1800+** ELO (same as v4) |
+| batch_size       | 128 (physical, no gradient accumulation)        |
+| lr_schedule      | WSD (`auto_cooldown=True`)                      |
+| lr               | 6e-4 (stable) → 1e-5 (linear cooldown)          |
+| warmup           | 5k iters                                        |
+| early stop       | `early_stop_min_iters=150k`, patience=25 evals  |
+| cooldown         | 38k iters (linear ramp)                         |
+| val loss (best)  | **1.4439** @ iter **196k**                      |
+| cooldown trigger | iter **160k**                                   |
+
+
+---
+
+## v6 — ~116M model, higher-quality data (2100+), WSD auto-cooldown
+
+**Checkpoint:** `checkpoints/patzer_v6`  
+**Config:** `patzer/config/train_patzer_v6.py`  
+**Trained:** May 2026 (Vast.ai; instance terminated after completion)
+
+### Architecture
+
+
+| param      | value |
+| ---------- | ----- |
+| n_layer    | 16    |
+| n_head     | 16    |
+| n_embd     | 768   |
+| block_size | 256   |
+| params     | ~116M |
+
+
+### Training
+
+
+| param            | value                                                         |
+| ---------------- | ------------------------------------------------------------- |
+| data             | ~1.73B train tokens, **2100+** ELO                            |
+| batch_size       | 128 (physical, no gradient accumulation)                      |
+| lr_schedule      | WSD (`auto_cooldown=True`)                                    |
+| lr               | 6e-4 (stable) → 1e-5 (linear cooldown)                        |
+| warmup           | 5k iters                                                      |
+| early stop       | `early_stop_min_iters=150k`, patience=25 evals                |
+| cooldown         | 38k iters (linear ramp)                                       |
+| val loss (best)  | **1.3960** @ iter **217k** (final logged eval; still falling) |
+| cooldown trigger | iter **180k**                                                 |
+
+
+**Important:** v5 and v6 use different val splits (1800+ vs 2100+), so the ~0.05-nat loss gap is not an apples-to-apples model quality comparison. Unified ladder Elo is the real comparison metric.
+
+### v5 / v6 — learnings
+
+**Setup.** Both runs used 16L/16H/768d (~116M params) and WSD with `auto_cooldown=True`. Shared schedule knobs: `cooldown_iters=38000`, `early_stop_min_iters=150000`, patience=25, `min_lr=1e-5`.
+
+**Outcomes.**
+
+- **v5**: best val **1.4439** @ **196k**. Cooldown triggered at **160k**.
+- **v6**: best val **1.3960** @ **217k** (final logged eval, still falling). Cooldown triggered at **180k**.
+
+#### Lessons
+
+- `**early_stop_min_iters=150000` was too conservative.** v5 was effectively flat (<0.0005 nats/1k iters) from iter ~100k; v6 from ~130k. The min-iter gate plus 25-eval patience meant cooldown could not trigger before ~175k regardless. Roughly 50–60k iters of constant-LR work produced ~0.013 nats per run — about what cooldown delivered in ~4k iters. **For v7: drop to 80–100k.**
+- `**cooldown_iters=38000` was too short (especially v6).** v6 was still dropping at ~0.004 nats/1k iters at cutoff — clearly cut off mid-improvement. v5 barely touched its floor at the last point. WSD ablations often land near ~20% of total; v6’s was ~17% (low end). **For v7: 25–30%**, or add a **min_lr tail with its own early stop** so you don’t have to guess cooldown length perfectly.
+- **“Stable phase does hidden work” is literature-backed, not directly proven here.** Hägele 2024 and Hu 2024 (MiniCPM) show WSD ≈ cosine at matched compute in comparative ablations; landscape theory (Wen 2024, Liu 2025) provides a mechanism. None of this is directly tested in Patzer. A side experiment — cosine over half the iters, matched architecture — would tell us if the long stable phase is “hidden work” or mostly GPU burn.
+- **v6 likely has +5–15 Elo of unrealized strength.** Resuming v6 from `weights_best.pt` for ~20–30k iters (at min_lr or with a fresh ramp down to ~1e-6) is cheap and extracts whatever’s left. v4’s analog evidence: ~30k iters at min_lr post-cooldown → ~0.006 nats; v6 starts its tail much steeper, so the residual gain could plausibly be **0.005–0.015 nats**.
+- **Trajectory shape is consistent across architectures.** v5/v6 match the v3/v4 pattern: ~75% of stable-phase gains in the first ~50k iters, then a long tail of marginal improvement. These schedule-tuning conclusions generalize; they’re not 116M-specific.
+
+#### v7 schedule defaults (proposed)
+
+```python
+early_stop_min_iters      = 100000   # was 150k
+early_stop_patience_evals = 25       # unchanged
+cooldown_iters            = 60000    # was 38k (~25–30% of expected total)
+auto_cooldown             = True     # unchanged
+min_lr                    = 1e-5     # unchanged
+# new: post-cooldown min_lr tail with its own patience-based stop
+# (currently auto_cooldown terminates at the end of the linear cooldown)
+```
+
+---
+
 ## Hardware & compute reference
 
 
-| Model | GPU         | Arch        | Params | Effective batch | Step time | Tokens/sec | Eval time (excl. R2) | eval_iters × batch |
-| ----- | ----------- | ----------- | ------ | --------------- | --------- | ---------- | -------------------- | ------------------ |
-| v1    | unknown     | 6L/6H/384d  | ~12M   | 128 (32×4)      | —         | —          | —                    | 200 × 32           |
-| v2    | RTX 3060    | 6L/6H/384d  | ~12M   | 128 (32×4)      | ~155 ms   | ~211k      | ~6 s                 | 200 × 32           |
-| v3    | RTX 3060    | 12L/8H/512d | ~40M   | 128 (32×4)      | ~470 ms   | ~70k       | ~32 s                | 200 × 32           |
-| v3    | RTX 4060 Ti | 12L/8H/512d | ~40M   | 128 (32×4)      | ~321 ms   | ~102k      | ~34 s                | 200 × 32           |
-| v4    | RTX 4060 Ti | 12L/8H/512d | ~40M   | 128 (128×1)     | ~318 ms   | ~103k      | ~10 s (+R2 on best)  | 50 × 128           |
+| Model | GPU         | Arch         | Params | Effective batch | Step time | Tokens/sec | Eval time (excl. R2) | eval_iters × batch |
+| ----- | ----------- | ------------ | ------ | --------------- | --------- | ---------- | -------------------- | ------------------ |
+| v1    | unknown     | 6L/6H/384d   | ~12M   | 128 (32×4)      | —         | —          | —                    | 200 × 32           |
+| v2    | RTX 3060    | 6L/6H/384d   | ~12M   | 128 (32×4)      | ~155 ms   | ~211k      | ~6 s                 | 200 × 32           |
+| v3    | RTX 3060    | 12L/8H/512d  | ~40M   | 128 (32×4)      | ~470 ms   | ~70k       | ~32 s                | 200 × 32           |
+| v3    | RTX 4060 Ti | 12L/8H/512d  | ~40M   | 128 (32×4)      | ~321 ms   | ~102k      | ~34 s                | 200 × 32           |
+| v4    | RTX 4060 Ti | 12L/8H/512d  | ~40M   | 128 (128×1)     | ~318 ms   | ~103k      | ~10 s (+R2 on best)  | 50 × 128           |
+| v5    | unknown     | 16L/16H/768d | ~116M  | 128 (128×1)     | —         | —          | —                    | 50 × 128           |
+| v6    | unknown     | 16L/16H/768d | ~116M  | 128 (128×1)     | —         | —          | —                    | 50 × 128           |
 
 
 **Notes:**
@@ -297,3 +402,4 @@ Per-iter val-loss progress across phases:
 - v4 briefly used **200 × 128** evals (4× v2/v3 sequence count, ~40s compute); config is now **50 × 128** to match v2/v3 coverage. Guard `eval_iters × batch_size` in future configs.
 - MFU of 7–8% is normal for small models on gaming GPUs (memory-bandwidth-bound, not FLOP-bound).
 - "Eval time" above is pure forward-pass compute; add R2 sync time (~16–20 s) whenever a new best val is saved.
+

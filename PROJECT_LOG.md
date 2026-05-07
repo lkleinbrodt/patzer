@@ -16,6 +16,12 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **2026-05-05:** **`train_patzer_v6.py` added** — same **16L / 16H / 768d** + WSD as v5; **`dataset = 'prepared_min_elo_2100'`** (~**1.73B** train tokens, **2100+** ELO). Output **`checkpoints/patzer_v6`**.
 
+- **2026-05-06:** **`train.py` — post-cooldown min_lr tail.** `auto_cooldown` now continues training at `min_lr` after the WSD cooldown finishes instead of terminating. On cooldown completion, `evals_without_improvement` is reset to 0 and a `[wsd] cooldown complete` log line is printed; patience-based early stopping then governs the actual exit. `max_iters` is extended to `cooldown_end + (patience+5)*eval_interval` as a safety cap. Resume-safe: `_post_cooldown_phase` is pre-set `True` on resume so the reset doesn't re-fire mid-tail. Also: `ckpt.pt` auto-pulled from R2 on `init_from=resume` when missing locally (rank-0 pull + DDP barrier). **`train_patzer_v7.py`** created: `early_stop_min_iters=90k` (was 150k), `cooldown_iters=50k` (was 38k), same arch (16L/16H/768d) + 2100+ data.
+
+- **2026-05-06:** **v6 post-cooldown continuation plan.** v6 used **WSD + `auto_cooldown=True`** and terminated after completing the linear decay to **`min_lr`**. If val loss is still improving at the end of cooldown, the practical continuation is a **new phase** resumed from `ckpt.pt` but **with a fresh LR policy** (e.g. hold a moderate constant LR by setting `decay_lr=False`, or switch schedules) rather than extending training at `min_lr` indefinitely.
+
+- **2026-05-06:** **ELO cutoff counting now matches `prepare.py --min-elo`.** **`pipeline/count_games_txt.py`** gained **`--min-elo-distribution`** to count games by **min(WhiteElo, BlackElo) >= cutoff** (both players >= cutoff), using **`min_elo_histogram`** from sibling **`games_*.stats.json`** when present (fast) and falling back to scanning text dumps otherwise. **`pipeline/parse_pgn.py`** now writes that `min_elo_histogram` alongside the existing average-ELO histogram for future months.
+
 - **2026-05-05:** **`launch.py` Vast search + remote CUDA preflight** — default query adds **`cuda_vers>=12.4`** (override with **`--min-cuda-vers 0`** to disable). Offer table includes a **CUDA** column (`cuda_max_good` / `cuda_vers`). Bootstrap script runs a **`torch.cuda.is_available()`** check in **`patzer/`** before R2 / `train.py` (exit **3** if no GPU).
 
 - **2026-05-05:** **`launch.py` config preflight** — before `--instance` or renting, **`validate_train_config()`** checks `patzer/config/{name}.py` exists under the repo, compiles, and `exec`s with normal builtins (typos / syntax errors fail locally with **exit 2**). **`--list` / `--status`** unchanged. Optional **`.py`** suffix on `--config` is stripped.
@@ -110,3 +116,18 @@ I want to write one (or many) blog posts about this project. So we should keep a
 - **2026-05-05:** **`pipeline/compress_games_txt.sh`** — for legacy plain **`games_*.txt`**: **`gzip -6 -k`** only if **`games_*.txt.gz`** is missing; require **`games_*.stats.json`** and **`gzip -dc` line count == `kept_games`** before **`rm`**’ing the **`.txt`**; nonzero exit if anything skips/errors (checksum/script rerun stays safe).
 
 - **2026-05-05:** **`pipeline/prefetch_lichess.sh`** — optional parallel downloader to overlap **network** with **CPU parse**. Watches `data/lichess_games/progress.json` and any already-downloaded `lichess_db_standard_rated_YYYY-MM.pgn.zst` files; keeps exactly **one month ahead** downloaded via resumable `wget -c` with low I/O priority (`nice` + `ionice`). Uses a lockfile to prevent multiple prefetchers per output dir.
+
+
+## 2026-05-06
+
+- Ran cross-dataset eval: `checkpoints/patzer_v6/weights_best.pt` on v5 validation set (`data/prepared/val.bin`). Used `eval/val_loss.py` on MPS (float32), 50 iters, batch 32. Result: mean val loss 1.4640 (std 0.0262). Checkpoint-reported v6 val loss was 1.3960 at iter 217000 (on its own v6 val).
+
+- **`scripts/patzer_page.html` + `scripts/build_blog_assets.py`:** Extended **`VERSION_META`** through **v5** and **v6** (aligned with **`MODELS.md`**). Hero **lichess Elo** uses the higher of **bullet** vs **blitz** with a matching subtitle (tie shows **blitz · bullet**). **Games played** copy now says all opponents (counts remain **`count.all`** from Lichess — all finished games on those accounts). Added **`training_tokens_short`** per version for hero metrics; flagship bot/challenge/footer lichess link follow the latest row in **`models.json`**. Regenerated **`scripts/blog_assets/*.json`** and re-embedded **`window.BLOG_DATA`**.
+
+- **`scripts/patzer_page.html` — live Lichess game counts:** **`POST /api/users`** omits **`count`** (only slim **`perfs`** etc.). Switched to sequential **`GET /api/user/{username}`** per bot so **`count.all`** is present; fixes blank **games played** / leaderboard **games** column.
+
+- **`scripts/patzer_page.html`:** Central **`fs(n) => round(n × 1.1)`** scales JSX **`fontSize`** and **`Mono`/`LiveDot`/`H2`** sizes (~10% larger copy site-wide).
+
+- **`scripts/patzer_page.html`:** Main column **`maxWidth` 780 → 960**; horizontal **`padding`** tightened (**`clamp(14px, 2.5vw, 28px)`**) so the layout uses more viewport width.
+
+- **`scripts/patzer_page.html`:** **`blog_assets/chess.png`** as favicon + hero mark beside the title; footer credit link to [Flaticon / VectorPortal chess icons](https://www.flaticon.com/free-icons/chess).

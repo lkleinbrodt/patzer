@@ -192,6 +192,7 @@ VERSION_META = {
         "sub": "12M · 1M games",
         "parameters_m": 12,
         "training_games_m": 1,
+        "training_tokens_short": "~80M",
         "layers": 6, "heads": 6, "dim": 384,
         "what_changed": "baseline — 12M params, 1M games",
         "lichess_username": "patzer_v1",
@@ -201,6 +202,7 @@ VERSION_META = {
         "sub": "12M · 11M games",
         "parameters_m": 12,
         "training_games_m": 11,
+        "training_tokens_short": "~868M",
         "layers": 6, "heads": 6, "dim": 384,
         "what_changed": "10× more training data, same architecture",
         "lichess_username": "patzer_v2b",
@@ -210,6 +212,7 @@ VERSION_META = {
         "sub": "40M · 11M games",
         "parameters_m": 40,
         "training_games_m": 11,
+        "training_tokens_short": "~868M",
         "layers": 12, "heads": 8, "dim": 512,
         "what_changed": "3× larger model, same data",
         "lichess_username": "patzer_v3",
@@ -219,9 +222,30 @@ VERSION_META = {
         "sub": "40M · 36M games",
         "parameters_m": 40,
         "training_games_m": 36,
+        "training_tokens_short": "~2.85B",
         "layers": 12, "heads": 8, "dim": 512,
         "what_changed": "3.3× more data + WSD lr schedule",
         "lichess_username": "patzer_v4",
+    },
+    "v5": {
+        "headline": "116M scale",
+        "sub": "116M · 36M games",
+        "parameters_m": 116,
+        "training_games_m": 36,
+        "training_tokens_short": "~2.85B",
+        "layers": 16, "heads": 16, "dim": 768,
+        "what_changed": "~116M params, same 36M-game corpus as v4 · WSD auto-cooldown",
+        "lichess_username": "patzer_v5",
+    },
+    "v6": {
+        "headline": "2100+ data",
+        "sub": "116M · 21M games",
+        "parameters_m": 116,
+        "training_games_m": 21,
+        "training_tokens_short": "~1.73B",
+        "layers": 16, "heads": 16, "dim": 768,
+        "what_changed": "2100+ ELO filter · same architecture as v5",
+        "lichess_username": "patzer_v6",
     },
 }
 
@@ -241,7 +265,7 @@ def build_models(games: list[dict]) -> None:
 
     models = []
     prev_elo = None
-    for ver in ["v1", "v2", "v3", "v4"]:
+    for ver in ["v1", "v2", "v3", "v4", "v5", "v6"]:
         meta = VERSION_META.get(ver, {})
         best = best_by_version.get(ver, {})
         elo = best.get("elo")

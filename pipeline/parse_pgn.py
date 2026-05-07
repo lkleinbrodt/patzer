@@ -155,6 +155,7 @@ def _process_batch(args):
         "result_counts": {"1-0": 0, "0-1": 0, "1/2-1/2": 0},
         "move_length_histogram": {},
         "elo_histogram": {},
+        "min_elo_histogram": {},
     }
 
     output_lines = []
@@ -212,6 +213,11 @@ def _process_batch(args):
         partial_stats["elo_histogram"][bucket_elo] = \
             partial_stats["elo_histogram"].get(bucket_elo, 0) + 1
 
+        min_elo = min(white_elo, black_elo)
+        bucket_min_elo = (min_elo // 100) * 100
+        partial_stats["min_elo_histogram"][bucket_min_elo] = \
+            partial_stats["min_elo_histogram"].get(bucket_min_elo, 0) + 1
+
     return output_lines, partial_stats
 
 
@@ -229,6 +235,7 @@ def _empty_stats():
         "result_counts": {"1-0": 0, "0-1": 0, "1/2-1/2": 0},
         "move_length_histogram": {},
         "elo_histogram": {},
+        "min_elo_histogram": {},
     }
 
 
@@ -246,6 +253,9 @@ def _merge_stats(target, partial):
     for k, v in partial["elo_histogram"].items():
         target["elo_histogram"][k] = \
             target["elo_histogram"].get(k, 0) + v
+    for k, v in partial.get("min_elo_histogram", {}).items():
+        target["min_elo_histogram"][k] = \
+            target["min_elo_histogram"].get(k, 0) + v
 
 
 # ── Game reader (accumulates PGN stream into game tuples) ─────────────────────
@@ -366,6 +376,11 @@ def parse_games_sequential(pgn_stream, output_file, args):
         stats["elo_histogram"][bucket_elo] = \
             stats["elo_histogram"].get(bucket_elo, 0) + 1
 
+        min_elo = min(white_elo, black_elo)
+        bucket_min_elo = (min_elo // 100) * 100
+        stats["min_elo_histogram"][bucket_min_elo] = \
+            stats["min_elo_histogram"].get(bucket_min_elo, 0) + 1
+
     stats["elapsed_seconds"] = round(time.time() - start_time, 1)
     return stats
 
@@ -457,6 +472,13 @@ def print_stats_summary(stats):
         bar = "█" * (count * 40 // max(stats["elo_histogram"].values()))
         print(f"  {bucket:>4}-{bucket+99}: {bar} {count:,}", file=sys.stderr)
 
+    if stats.get("min_elo_histogram"):
+        print("\nMin(player) ELO distribution:", file=sys.stderr)
+        for bucket in sorted(stats["min_elo_histogram"].keys()):
+            count = stats["min_elo_histogram"][bucket]
+            bar = "█" * (count * 40 // max(stats["min_elo_histogram"].values()))
+            print(f"  {bucket:>4}-{bucket+99}: {bar} {count:,}", file=sys.stderr)
+
 
 def main():
     args = parse_args()
@@ -508,6 +530,8 @@ def main():
         sorted((int(k), v) for k, v in stats["move_length_histogram"].items()))
     stats["elo_histogram"] = dict(
         sorted((int(k), v) for k, v in stats["elo_histogram"].items()))
+    stats["min_elo_histogram"] = dict(
+        sorted((int(k), v) for k, v in stats.get("min_elo_histogram", {}).items()))
 
     with open(stats_path, "w") as f:
         json.dump(stats, f, indent=2)

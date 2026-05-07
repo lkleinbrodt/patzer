@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-04T18:03:56.803474+00:00",
+  "generated_at": "2026-05-06T23:06:01.339700+00:00",
   "models": [
     {
       "version": "v1",
@@ -7,14 +7,15 @@
       "sub": "12M \u00b7 1M games",
       "parameters_m": 12,
       "training_games_m": 1,
+      "training_tokens_short": "~80M",
       "layers": 6,
       "heads": 6,
       "dim": 384,
       "what_changed": "baseline \u2014 12M params, 1M games",
       "lichess_username": "patzer_v1",
       "best_checkpoint": "patzer_v1@40",
-      "elo_stockfish": 1195.9,
-      "elo_stderr": 12.8,
+      "elo_stockfish": 1199.0,
+      "elo_stderr": 12.5,
       "elo_delta": null
     },
     {
@@ -23,15 +24,16 @@
       "sub": "12M \u00b7 11M games",
       "parameters_m": 12,
       "training_games_m": 11,
+      "training_tokens_short": "~868M",
       "layers": 6,
       "heads": 6,
       "dim": 384,
       "what_changed": "10\u00d7 more training data, same architecture",
       "lichess_username": "patzer_v2b",
       "best_checkpoint": "patzer_v2@288",
-      "elo_stockfish": 1402.5,
-      "elo_stderr": 10.9,
-      "elo_delta": 206.6
+      "elo_stockfish": 1404.0,
+      "elo_stderr": 10.1,
+      "elo_delta": 205.0
     },
     {
       "version": "v3",
@@ -39,15 +41,16 @@
       "sub": "40M \u00b7 11M games",
       "parameters_m": 40,
       "training_games_m": 11,
+      "training_tokens_short": "~868M",
       "layers": 12,
       "heads": 8,
       "dim": 512,
       "what_changed": "3\u00d7 larger model, same data",
       "lichess_username": "patzer_v3",
       "best_checkpoint": "patzer_v3@180",
-      "elo_stockfish": 1579.1,
-      "elo_stderr": 10.1,
-      "elo_delta": 176.6
+      "elo_stockfish": 1588.7,
+      "elo_stderr": 9.2,
+      "elo_delta": 184.7
     },
     {
       "version": "v4",
@@ -55,15 +58,50 @@
       "sub": "40M \u00b7 36M games",
       "parameters_m": 40,
       "training_games_m": 36,
+      "training_tokens_short": "~2.85B",
       "layers": 12,
       "heads": 8,
       "dim": 512,
       "what_changed": "3.3\u00d7 more data + WSD lr schedule",
       "lichess_username": "patzer_v4",
       "best_checkpoint": "patzer_v4@201",
-      "elo_stockfish": 1600.3,
-      "elo_stderr": 11.5,
-      "elo_delta": 21.2
+      "elo_stockfish": 1599.1,
+      "elo_stderr": 9.5,
+      "elo_delta": 10.4
+    },
+    {
+      "version": "v5",
+      "headline": "116M scale",
+      "sub": "116M \u00b7 36M games",
+      "parameters_m": 116,
+      "training_games_m": 36,
+      "training_tokens_short": "~2.85B",
+      "layers": 16,
+      "heads": 16,
+      "dim": 768,
+      "what_changed": "~116M params, same 36M-game corpus as v4 \u00b7 WSD auto-cooldown",
+      "lichess_username": "patzer_v5",
+      "best_checkpoint": "patzer_v5@196",
+      "elo_stockfish": 1687.9,
+      "elo_stderr": 14.9,
+      "elo_delta": 88.8
+    },
+    {
+      "version": "v6",
+      "headline": "2100+ data",
+      "sub": "116M \u00b7 21M games",
+      "parameters_m": 116,
+      "training_games_m": 21,
+      "training_tokens_short": "~1.73B",
+      "layers": 16,
+      "heads": 16,
+      "dim": 768,
+      "what_changed": "2100+ ELO filter \u00b7 same architecture as v5",
+      "lichess_username": "patzer_v6",
+      "best_checkpoint": "patzer_v6@217",
+      "elo_stockfish": 1740.6,
+      "elo_stderr": 13.2,
+      "elo_delta": 52.7
     }
   ]
 }

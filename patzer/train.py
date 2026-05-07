@@ -27,7 +27,7 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group, broadcast
+from torch.distributed import init_process_group, destroy_process_group, broadcast, barrier
 
 from model import GPTConfig, GPT
 from checkpoint_util import load_checkpoint
@@ -209,10 +209,27 @@ elif init_from == 'resume':
     # resume training from a checkpoint.
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
     if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(
-            f"init_from=resume but checkpoint not found at {ckpt_path}. "
-            f"Did you forget to download from R2 (or set R2 env vars)?"
-        )
+        # If the checkpoint dir was stored on R2 (common on ephemeral clusters),
+        # try to pull it automatically before failing.
+        if master_process:
+            print(f"[resume] checkpoint not found locally: {ckpt_path}")
+            print(f"[resume] attempting R2 pull: {ckpt_path}")
+            ok = r2.pull_file(ckpt_path, ckpt_path, skip_existing=False)
+            if ok and os.path.exists(ckpt_path):
+                print(f"[resume] pulled checkpoint from R2: {ckpt_path}")
+            else:
+                print(
+                    f"[resume] R2 pull failed or checkpoint not present on R2: {ckpt_path}",
+                    file=sys.stderr,
+                )
+        if ddp:
+            # Ensure rank 0 finishes the pull before other ranks attempt to read.
+            barrier()
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(
+                f"init_from=resume but checkpoint not found at {ckpt_path}. "
+                f"Tried pulling from R2; ensure R2 env vars are set and the key exists."
+            )
     checkpoint = load_checkpoint(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -292,6 +309,15 @@ if init_from == 'resume':
             _last_snapshot_iter = int(_prev.get('iter_num', 0))
         except Exception:
             pass
+
+# True once we have entered the post-cooldown min_lr tail — used to give that
+# phase a one-time patience reset without re-firing on mid-tail resumes.
+# Pre-set to True on resume so we don't wipe the saved evals_without_improvement.
+_post_cooldown_phase: bool = (
+    init_from == 'resume'
+    and cooldown_start_iter is not None
+    and iter_num >= cooldown_start_iter + cooldown_iters
+)
 
 # Register a final R2 sync via atexit so it runs on any exit: normal, early-stop,
 # KeyboardInterrupt (Ctrl+C), or uncaught exception. Drain async uploads first,
@@ -420,6 +446,22 @@ while True:
             else:
                 evals_without_improvement += 1
 
+        # One-time patience reset when WSD cooldown completes. Gives the post-cooldown
+        # min_lr tail a fresh patience window so training doesn't terminate immediately
+        # if val happened to plateau at the end of cooldown.
+        # Skipped on resume (when _post_cooldown_phase is already True from init).
+        if (auto_cooldown and lr_schedule == 'wsd'
+                and cooldown_start_iter is not None
+                and iter_num >= cooldown_start_iter + cooldown_iters
+                and not _post_cooldown_phase):
+            _post_cooldown_phase = True
+            evals_without_improvement = 0
+            print(
+                f"[wsd] cooldown complete at iter {iter_num}; entering min_lr tail "
+                f"(patience={early_stop_patience_evals} evals × eval_interval={eval_interval} = "
+                f"{early_stop_patience_evals * eval_interval} iters)"
+            )
+
         # Save behavior:
         # - `weights_best.pt` saved locally on ANY val improvement (true best always on disk)
         # - R2 upload of `weights_best.pt` is rate-limited by ckpt_best_min_delta and
@@ -547,12 +589,17 @@ while True:
         if auto_cooldown and lr_schedule == 'wsd' and cooldown_start_iter is None:
             # Instead of stopping, trigger the WSD cooldown and keep going.
             cooldown_start_iter = iter_num
-            max_iters = iter_num + cooldown_iters
+            # Extend max_iters to cover cooldown + a full patience tail at min_lr.
+            # The actual stop after cooldown is patience-based (see eval block above),
+            # not this cap — this just ensures we don't hit the old tight ceiling.
+            _patience_tail = max(early_stop_patience_evals + 5, 30) * eval_interval
+            max_iters = iter_num + cooldown_iters + _patience_tail
             evals_without_improvement = 0
             if master_process:
                 print(
                     f"auto_cooldown: plateau after {early_stop_patience_evals} evals at iter {iter_num}; "
-                    f"starting WSD cooldown → will finish at iter {max_iters}"
+                    f"starting WSD cooldown ({cooldown_iters} iters) + min_lr tail "
+                    f"(up to {_patience_tail} iters); hard cap at iter {max_iters}"
                 )
         else:
             if master_process:

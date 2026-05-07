@@ -1163,8 +1163,6 @@ def cmd_head2head(args: argparse.Namespace) -> None:
     if len(checkpoints) > 2 and not args.round_robin:
         sys.exit("Pass --round-robin to compare more than 2 checkpoints.")
 
-    pairs = list(combinations(range(len(checkpoints)), 2)) if args.round_robin else [(0, 1)]
-
     rng = random.Random(args.seed)
 
     models: list[Patzer] = []
@@ -1204,6 +1202,9 @@ def cmd_head2head(args: argparse.Namespace) -> None:
         checkpoints = [checkpoints[i] for i in keep_idx]
         models = [models[i] for i in keep_idx]
         names = [names[i] for i in keep_idx]
+
+    # Build pairs AFTER dedup so indices are valid against the final checkpoints/models lists.
+    pairs = list(combinations(range(len(checkpoints)), 2)) if args.round_robin else [(0, 1)]
 
     opening_book = _load_opening_book()
     db_path = Path(args.db)

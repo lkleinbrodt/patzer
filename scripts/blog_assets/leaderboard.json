@@ -1,140 +1,250 @@
 {
-  "generated_at": "2026-05-04T18:03:55.660671+00:00",
+  "generated_at": "2026-05-06T23:05:56.564235+00:00",
   "entries": [
+    {
+      "checkpoint": "patzer_v6@217",
+      "version": "v6",
+      "elo": 1740.6,
+      "stderr": 13.2,
+      "games": 736,
+      "wins": 368,
+      "losses": 224,
+      "draws": 144
+    },
+    {
+      "checkpoint": "patzer_v5@196",
+      "version": "v5",
+      "elo": 1687.9,
+      "stderr": 14.9,
+      "games": 558,
+      "wins": 197,
+      "losses": 251,
+      "draws": 110
+    },
+    {
+      "checkpoint": "patzer_v6@201",
+      "version": "v6",
+      "elo": 1642.9,
+      "stderr": 14.7,
+      "games": 598,
+      "wins": 282,
+      "losses": 179,
+      "draws": 137
+    },
+    {
+      "checkpoint": "patzer_v5@182",
+      "version": "v5",
+      "elo": 1625.2,
+      "stderr": 13.5,
+      "games": 770,
+      "wins": 406,
+      "losses": 198,
+      "draws": 166
+    },
     {
       "checkpoint": "patzer_v4@201",
       "version": "v4",
-      "elo": 1600.3,
-      "stderr": 11.5,
-      "games": 1124,
-      "wins": 635,
-      "losses": 233,
-      "draws": 256
+      "elo": 1599.1,
+      "stderr": 9.5,
+      "games": 1574,
+      "wins": 825,
+      "losses": 405,
+      "draws": 344
     },
     {
       "checkpoint": "patzer_v3@180",
       "version": "v3",
-      "elo": 1579.1,
-      "stderr": 10.1,
-      "games": 1484,
-      "wins": 815,
-      "losses": 360,
-      "draws": 309
+      "elo": 1588.7,
+      "stderr": 9.2,
+      "games": 1740,
+      "wins": 919,
+      "losses": 455,
+      "draws": 366
     },
     {
       "checkpoint": "patzer_v3@145",
       "version": "v3",
-      "elo": 1569.1,
-      "stderr": 12.0,
-      "games": 1100,
-      "wins": 634,
-      "losses": 212,
-      "draws": 254
+      "elo": 1567.6,
+      "stderr": 10.1,
+      "games": 1460,
+      "wins": 780,
+      "losses": 330,
+      "draws": 350
+    },
+    {
+      "checkpoint": "patzer_v6@144",
+      "version": "v6",
+      "elo": 1553.3,
+      "stderr": 11.9,
+      "games": 870,
+      "wins": 357,
+      "losses": 316,
+      "draws": 197
+    },
+    {
+      "checkpoint": "patzer_v5@89",
+      "version": "v5",
+      "elo": 1542.5,
+      "stderr": 17.4,
+      "games": 430,
+      "wins": 174,
+      "losses": 132,
+      "draws": 124
+    },
+    {
+      "checkpoint": "patzer_v6@109",
+      "version": "v6",
+      "elo": 1538.3,
+      "stderr": 18.3,
+      "games": 370,
+      "wins": 127,
+      "losses": 147,
+      "draws": 96
     },
     {
       "checkpoint": "patzer_v3@111",
       "version": "v3",
-      "elo": 1530.2,
-      "stderr": 11.7,
-      "games": 1100,
-      "wins": 581,
-      "losses": 272,
-      "draws": 247
+      "elo": 1537.3,
+      "stderr": 10.1,
+      "games": 1410,
+      "wins": 698,
+      "losses": 388,
+      "draws": 324
+    },
+    {
+      "checkpoint": "patzer_v6@85",
+      "version": "v6",
+      "elo": 1513.5,
+      "stderr": 15.9,
+      "games": 500,
+      "wins": 161,
+      "losses": 213,
+      "draws": 126
+    },
+    {
+      "checkpoint": "patzer_v6@40",
+      "version": "v6",
+      "elo": 1480.6,
+      "stderr": 15.3,
+      "games": 560,
+      "wins": 199,
+      "losses": 226,
+      "draws": 135
     },
     {
       "checkpoint": "patzer_v3@80",
       "version": "v3",
-      "elo": 1476.5,
-      "stderr": 13.0,
-      "games": 850,
-      "wins": 387,
-      "losses": 221,
-      "draws": 242
+      "elo": 1479.8,
+      "stderr": 10.9,
+      "games": 1160,
+      "wins": 483,
+      "losses": 348,
+      "draws": 329
+    },
+    {
+      "checkpoint": "patzer_v5@41",
+      "version": "v5",
+      "elo": 1475.0,
+      "stderr": 14.2,
+      "games": 640,
+      "wins": 218,
+      "losses": 262,
+      "draws": 160
     },
     {
       "checkpoint": "patzer_v4@104",
       "version": "v4",
-      "elo": 1416.2,
-      "stderr": 12.6,
-      "games": 840,
-      "wins": 260,
-      "losses": 355,
-      "draws": 225
+      "elo": 1426.1,
+      "stderr": 11.2,
+      "games": 1060,
+      "wins": 321,
+      "losses": 459,
+      "draws": 280
     },
     {
       "checkpoint": "patzer_v4@81",
       "version": "v4",
-      "elo": 1402.9,
-      "stderr": 13.9,
-      "games": 700,
-      "wins": 200,
-      "losses": 295,
-      "draws": 205
+      "elo": 1410.6,
+      "stderr": 12.4,
+      "games": 870,
+      "wins": 250,
+      "losses": 371,
+      "draws": 249
     },
     {
       "checkpoint": "patzer_v2@288",
       "version": "v2",
-      "elo": 1402.5,
-      "stderr": 10.9,
-      "games": 1200,
-      "wins": 398,
-      "losses": 484,
-      "draws": 318
-    },
-    {
-      "checkpoint": "patzer_v2@274",
-      "version": "v2",
-      "elo": 1388.9,
-      "stderr": 14.3,
-      "games": 680,
-      "wins": 236,
-      "losses": 271,
-      "draws": 173
+      "elo": 1404.0,
+      "stderr": 10.1,
+      "games": 1370,
+      "wins": 427,
+      "losses": 573,
+      "draws": 370
     },
     {
       "checkpoint": "patzer_v2@220",
       "version": "v2",
-      "elo": 1384.0,
-      "stderr": 14.3,
-      "games": 682,
-      "wins": 233,
-      "losses": 276,
-      "draws": 173
+      "elo": 1392.6,
+      "stderr": 13.2,
+      "games": 802,
+      "wins": 267,
+      "losses": 339,
+      "draws": 196
+    },
+    {
+      "checkpoint": "patzer_v2@274",
+      "version": "v2",
+      "elo": 1389.6,
+      "stderr": 13.1,
+      "games": 800,
+      "wins": 262,
+      "losses": 326,
+      "draws": 212
     },
     {
       "checkpoint": "patzer_v3@40",
       "version": "v3",
-      "elo": 1373.3,
-      "stderr": 15.7,
-      "games": 572,
-      "wins": 198,
-      "losses": 229,
-      "draws": 145
+      "elo": 1378.1,
+      "stderr": 13.7,
+      "games": 742,
+      "wins": 235,
+      "losses": 314,
+      "draws": 193
+    },
+    {
+      "checkpoint": "patzer_v5@20",
+      "version": "v5",
+      "elo": 1372.2,
+      "stderr": 18.1,
+      "games": 420,
+      "wins": 118,
+      "losses": 185,
+      "draws": 117
     },
     {
       "checkpoint": "patzer_v4@40",
       "version": "v4",
-      "elo": 1361.0,
-      "stderr": 15.2,
-      "games": 602,
-      "wins": 199,
-      "losses": 249,
-      "draws": 154
+      "elo": 1368.9,
+      "stderr": 13.9,
+      "games": 722,
+      "wins": 234,
+      "losses": 307,
+      "draws": 181
     },
     {
       "checkpoint": "patzer_v2@120",
       "version": "v2",
-      "elo": 1302.5,
-      "stderr": 17.1,
-      "games": 492,
-      "wins": 141,
-      "losses": 220,
-      "draws": 131
+      "elo": 1310.0,
+      "stderr": 16.9,
+      "games": 512,
+      "wins": 144,
+      "losses": 234,
+      "draws": 134
     },
     {
       "checkpoint": "patzer_v2@180",
       "version": "v2",
-      "elo": 1289.4,
+      "elo": 1294.4,
       "stderr": 16.8,
       "games": 512,
       "wins": 125,
@@ -142,19 +252,9 @@
       "draws": 160
     },
     {
-      "checkpoint": "patzer_v1@40",
-      "version": "v1",
-      "elo": 1195.9,
-      "stderr": 12.8,
-      "games": 1162,
-      "wins": 125,
-      "losses": 756,
-      "draws": 281
-    },
-    {
       "checkpoint": "patzer_v2@50",
       "version": "v2",
-      "elo": 1194.6,
+      "elo": 1199.5,
       "stderr": 17.3,
       "games": 564,
       "wins": 72,
@@ -162,9 +262,19 @@
       "draws": 164
     },
     {
+      "checkpoint": "patzer_v1@40",
+      "version": "v1",
+      "elo": 1199.0,
+      "stderr": 12.5,
+      "games": 1212,
+      "wins": 129,
+      "losses": 786,
+      "draws": 297
+    },
+    {
       "checkpoint": "patzer_v3@10",
       "version": "v3",
-      "elo": 1123.9,
+      "elo": 1128.7,
       "stderr": 20.6,
       "games": 472,
       "wins": 39,

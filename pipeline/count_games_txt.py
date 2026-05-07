@@ -15,6 +15,11 @@ scan every newline (full disk read).
 ``elo_histogram`` from each ``games_*.stats.json`` when available (fast); otherwise it
 parses the text dumps. This is not the same rule as ``prepare.py --min-elo``.
 
+``--min-elo-distribution`` tabulates games by *min player rating* cutoff
+(``min(WhiteElo, BlackElo)``). This matches the ``prepare.py --min-elo`` rule and will
+use ``min_elo_histogram`` from ``games_*.stats.json`` when available; otherwise it reads
+each games file line-by-line.
+
 Examples (from repo root):
   python pipeline/count_games_txt.py
   python pipeline/count_games_txt.py --estimate
@@ -24,6 +29,10 @@ Examples (from repo root):
   # Average ELO at each cutoff (see --elo-distribution); prefers *.stats.json
   python pipeline/count_games_txt.py --elo-distribution
   python pipeline/count_games_txt.py --elo-distribution --elo-low 1600 --elo-high 2800 --elo-step 50
+
+  # Prepare-style: both players >= cutoff (min player ELO at each cutoff)
+  python pipeline/count_games_txt.py --min-elo-distribution
+  python pipeline/count_games_txt.py --min-elo-distribution --elo-low 1600 --elo-high 2600 --elo-step 100
 """
 
 from __future__ import annotations
@@ -67,6 +76,15 @@ def parse_args():
             "For each cutoff C, count games whose average rating (White+Black)//2 is >= C. "
             "Uses elo_histogram in games_*.stats.json when present (fast); otherwise reads "
             "each games file. Not the same as prepare.py --min-elo (both players >= C)."
+        ),
+    )
+    p.add_argument(
+        "--min-elo-distribution",
+        action="store_true",
+        help=(
+            "For each cutoff C, count games where both players are >= C "
+            "(i.e. min(WhiteElo, BlackElo) >= C). Uses min_elo_histogram in "
+            "games_*.stats.json when present (fast); otherwise reads each games file."
         ),
     )
     p.add_argument(
@@ -154,6 +172,31 @@ def load_elo_histogram_from_stats(stats_path: Path) -> dict[int, int] | None:
     if not data or "elo_histogram" not in data:
         return None
     raw = data["elo_histogram"]
+    if not isinstance(raw, dict):
+        return None
+    out: dict[int, int] = {}
+    for k, v in raw.items():
+        try:
+            bk = int(k)
+            bv = int(v)
+        except (TypeError, ValueError):
+            continue
+        if bv < 0:
+            continue
+        out[bk] = out.get(bk, 0) + bv
+    return out
+
+
+def load_histogram_from_stats(stats_path: Path, key: str) -> dict[int, int] | None:
+    """
+    Load a histogram dict from stats JSON.
+
+    Expected shape: { "<bucket_lo_int>": <count_int>, ... } where bucket_lo is a multiple of 100.
+    """
+    data = _load_stats_json(stats_path)
+    if not data or key not in data:
+        return None
+    raw = data[key]
     if not isinstance(raw, dict):
         return None
     out: dict[int, int] = {}
@@ -356,7 +399,7 @@ def run_elo_distribution(
     )
     print(
         "  This is NOT prepare.py --min-elo (both players must be >= N). "
-        "For that rule, use a full parse elsewhere or extend scrape stats."
+        "For that rule, use --min-elo-distribution."
     )
     if n_from_stats_files and scan_paths:
         print(
@@ -394,6 +437,117 @@ def run_elo_distribution(
         print(f"Read time: {dt:.3f}s (stats.json only)")
 
 
+def run_min_elo_distribution(
+    paths: list[Path],
+    elo_low: int,
+    elo_high: int,
+    elo_step: int,
+) -> None:
+    """
+    For each cutoff C, count games where min(white_elo, black_elo) >= C.
+
+    When ``games_*.stats.json`` includes ``min_elo_histogram``, buckets are merged and
+    cutoffs applied using a uniform-within-bucket approximation for cutoffs inside a bin.
+    Months without a usable histogram are read from the games text file line by line.
+    """
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from pipeline.prepare import parse_game_elos
+
+    cutoffs = _elo_cutoffs(elo_low, elo_high, elo_step)
+    if not cutoffs:
+        print("No cutoffs in range; check --elo-low, --elo-high, --elo-step", file=sys.stderr)
+        sys.exit(2)
+
+    merged_hist: dict[int, int] = {}
+    scan_paths: list[Path] = []
+    stats_kept_sum = 0
+    n_from_stats_files = 0
+
+    for p in sorted(paths, key=lambda q: q.name):
+        sp = stats_json_path_for_games_file(p)
+        data = _load_stats_json(sp)
+        hist = load_histogram_from_stats(sp, "min_elo_histogram")
+        if hist is None:
+            scan_paths.append(p)
+            continue
+        kg = data.get("kept_games") if data else None
+        if not hist:
+            if isinstance(kg, int) and kg == 0:
+                pass
+            else:
+                scan_paths.append(p)
+                continue
+        for b, n in hist.items():
+            merged_hist[b] = merged_hist.get(b, 0) + n
+        if isinstance(kg, int) and kg >= 0:
+            stats_kept_sum += kg
+        else:
+            stats_kept_sum += sum(hist.values())
+        n_from_stats_files += 1
+
+    t0 = time.time()
+    count_f = _counts_from_elo_histogram(merged_hist, cutoffs)
+    total_lines = stats_kept_sum
+    parseable = stats_kept_sum
+
+    for p in scan_paths:
+        with open_text_games(p) as f:
+            for line in f:
+                total_lines += 1
+                elos = parse_game_elos(line)
+                if elos is None:
+                    continue
+                parseable += 1
+                min_elo = min(elos[0], elos[1])
+                for c in cutoffs:
+                    if min_elo >= c:
+                        count_f[c] += 1.0
+
+    dt = time.time() - t0
+
+    print(
+        "ELO cutoffs: per-game min player rating = min(White ELO, Black ELO). "
+        "This matches prepare.py --min-elo."
+    )
+    print(
+        "  From games_*.stats.json: 100-point min-ELO bins. If a cutoff falls "
+        "inside a bin, the contribution is scaled assuming min ELO is uniformly "
+        "distributed across that bin’s 100 integer values."
+    )
+    if n_from_stats_files and scan_paths:
+        print(
+            f"  Mixed inputs: {n_from_stats_files} month(s) from stats.json, "
+            f"{len(scan_paths)} file(s) read from disk."
+        )
+    elif n_from_stats_files and not scan_paths:
+        print(f"  All {n_from_stats_files} input(s) used min_elo_histogram from stats.json only.")
+    elif scan_paths and not n_from_stats_files:
+        print(f"  No usable stats.json next to inputs; all {len(scan_paths)} file(s) read from disk.")
+
+    print(f"Cutoffs: {cutoffs[0]} .. {cutoffs[-1]} every {elo_step} "
+          f"({len(cutoffs)} levels)")
+    print()
+    w = max(len(str(c)) for c in cutoffs)
+    print(f"  {'cutoff':>{w}s}  {'n_games':>14}  {'% of lines':>12}  {'% parseable':>14}")
+    for c in cutoffs:
+        n = int(round(count_f[c]))
+        pct_lines = 100.0 * n / max(total_lines, 1)
+        pct_ok = 100.0 * n / max(parseable, 1)
+        print(f"  {c:{w}d}  {n:>14,}  {pct_lines:>11.2f}%  {pct_ok:>13.2f}%")
+    print()
+    print(f"Total lines in files:  {total_lines:,}")
+    print(f"Parseable game lines:  {parseable:,}")
+    if scan_paths:
+        print(
+            f"Read time: {dt:.1f}s ({total_lines / max(dt, 1e-6) / 1e6:.2f}M lines/s; "
+            f"includes {len(scan_paths)} full file read(s))"
+        )
+    else:
+        print(f"Read time: {dt:.3f}s (stats.json only)")
+
+
 def main() -> None:
     args = parse_args()
     paths = sorted(resolve_files(list(args.input)), key=lambda q: q.name)
@@ -402,15 +556,18 @@ def main() -> None:
         print("No input files matched. Check --input globs.", file=sys.stderr)
         sys.exit(1)
 
-    if args.elo_distribution:
+    if args.elo_distribution or args.min_elo_distribution:
         if args.estimate or args.exact:
             print(
-                "Note: --elo-distribution ignores --estimate / --exact "
+                "Note: --elo-distribution / --min-elo-distribution ignore --estimate / --exact "
                 "(uses stats elo_histogram when present, else reads games files).",
                 file=sys.stderr,
             )
         try:
-            run_elo_distribution(paths, args.elo_low, args.elo_high, args.elo_step)
+            if args.min_elo_distribution:
+                run_min_elo_distribution(paths, args.elo_low, args.elo_high, args.elo_step)
+            else:
+                run_elo_distribution(paths, args.elo_low, args.elo_high, args.elo_step)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(2)

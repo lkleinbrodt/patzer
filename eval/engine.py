@@ -162,7 +162,7 @@ class Patzer:
         legal_ids = {self.tokenizer.token_to_id[m] for m in legal_moves}
         logits = _apply_legal_move_mask(logits, legal_ids)
 
-        if self.top_k is not None:
+        if self.top_k is not None and self.top_k > 0:
             v, _ = torch.topk(logits, min(self.top_k, len(legal_ids)))
             logits[logits < v[-1]] = float("-inf")
 
