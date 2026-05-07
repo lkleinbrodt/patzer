@@ -135,6 +135,10 @@ I want to write one (or many) blog posts about this project. So we should keep a
 - **2026-05-05:** **`pipeline/prefetch_lichess.sh`** — optional parallel downloader to overlap **network** with **CPU parse**. Watches `data/lichess_games/progress.json` and any already-downloaded `lichess_db_standard_rated_YYYY-MM.pgn.zst` files; keeps exactly **one month ahead** downloaded via resumable `wget -c` with low I/O priority (`nice` + `ionice`). Uses a lockfile to prevent multiple prefetchers per output dir.
 
 
+## 2026-05-07
+
+- **`train_patzer_v7.py` — ~306M model (24L / 16H / 1024d).** Replaced the painful ~508M 40L design with GPT-2-medium-style depth/width: **`batch_size=64`**, **`gradient_accumulation_steps=2`** (effective batch 128 × 256 tok/step like v6), **`gradient_checkpointing=False`**, **`learning_rate=4e-4`**, **`max_iters=400000`**, **`warmup_iters=5000`**, **`cooldown_iters=60000`**, **`early_stop_min_iters=100000`**, **`eval_iters=100`** (100×64 = v6’s 6400 seqs/split).
+
 ## 2026-05-06
 
 - Ran cross-dataset eval: `checkpoints/patzer_v6/weights_best.pt` on v5 validation set (`data/prepared/val.bin`). Used `eval/val_loss.py` on MPS (float32), 50 iters, batch 32. Result: mean val loss 1.4640 (std 0.0262). Checkpoint-reported v6 val loss was 1.3960 at iter 217000 (on its own v6 val).
