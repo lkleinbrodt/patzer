@@ -137,6 +137,8 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 ## 2026-05-07
 
+- **`bot/configs` — lichess-bot configs for Patzer v5 + v6.** Added **`patzer_v5.yml`** / **`patzer_v6.yml`**, mirroring **`patzer_v4.yml`** (same homemade engine options / challenge / matchmaking knobs) while pointing **`homemade_options.patzer_checkpoint`** at **`checkpoints/patzer_v5/weights_best.pt`** / **`checkpoints/patzer_v6/weights_best.pt`** and updating greetings.
+
 - **`train_patzer_v7.py` — ~306M model (24L / 16H / 1024d).** Replaced the painful ~508M 40L design with GPT-2-medium-style depth/width: **`batch_size=64`**, **`gradient_accumulation_steps=2`** (effective batch 128 × 256 tok/step like v6), **`gradient_checkpointing=False`**, **`learning_rate=4e-4`**, **`max_iters=400000`**, **`warmup_iters=5000`**, **`cooldown_iters=60000`**, **`early_stop_min_iters=100000`**, **`eval_iters=100`** (100×64 = v6’s 6400 seqs/split).
 
 ## 2026-05-06
