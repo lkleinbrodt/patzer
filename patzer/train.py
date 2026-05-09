@@ -475,12 +475,10 @@ while True:
 
         _val_loss_history.append(val_loss)
         # Sliding-window rate check: fire if val has barely moved over the last N evals.
-        # Only active during the WSD stable phase (cooldown not yet started).
+        # Active in all phases (stable, cooldown, min_lr tail). Natural gate: len check means
+        # the window must fill before it can fire (~N*eval_interval iters of warmup).
         _window_trigger = False
         if (early_stop_window_evals > 0
-                and lr_schedule == 'wsd'
-                and cooldown_start_iter is None
-                and iter_num >= early_stop_min_iters
                 and len(_val_loss_history) >= early_stop_window_evals):
             window_improvement = _val_loss_history[-early_stop_window_evals] - val_loss
             if window_improvement < early_stop_window_min_improvement:

@@ -6,8 +6,13 @@
 # v7 hit 1.50 val at 75k and only 1.48 by 180k — a 0.02 drop over 105k iters.
 # The stable phase plateau wasn't worth continuing; jumping to cooldown now.
 #
-# early_stop_min_iters=241000 blocks early stopping until cooldown finishes (240k),
-# then the post-cooldown patience reset fires and we get 15 clean evals at min_lr.
+# early_stop_min_iters=241000 gates PATIENCE only — keeps stale evals_without_improvement
+# from the resumed checkpoint firing mid-cooldown. The post-cooldown patience reset at
+# 240k then gives 15 clean evals at min_lr.
+#
+# early_stop_window_* works independently: the window fills over the first
+# early_stop_window_evals evals and can fire in any phase (cooldown or tail).
+# If val hasn't dropped 0.002 nats over any 15-eval window, something is wrong — stop.
 
 out_dir = 'checkpoints/patzer_v7'
 eval_interval = 1000
@@ -18,7 +23,9 @@ init_from = 'resume'
 
 always_save_checkpoint = True
 early_stop_patience_evals = 15      # shorter tail patience (15k iters at min_lr)
-early_stop_min_iters = 241000       # block early stop until cooldown ends (180k+60k+1k)
+early_stop_min_iters = 241000       # gates patience only: block until cooldown ends (180k+60k+1k)
+early_stop_window_evals = 15        # 15k-iter sliding window (fills ~15 evals after resume)
+early_stop_window_min_improvement = 0.002  # stop if val drops < 0.002 over any 15-eval window
 ckpt_save_interval = 10000
 weights_snapshot_interval = 5000    # more frequent snapshots — val drops steadily in cooldown
 ckpt_best_min_delta = 0.0001        # smaller threshold for cooldown's consistent small gains
