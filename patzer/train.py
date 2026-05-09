@@ -62,7 +62,9 @@ weights_snapshot_interval = 10000
 # Early stopping on val loss (0 = disabled). Counts consecutive evals without val improvement.
 early_stop_patience_evals = 0
 early_stop_min_iters = 0 # require at least this many steps before early stop can trigger
-# Sliding-window rate-of-improvement check (WSD stable phase only, 0 = disabled).
+# Sliding-window rate-of-improvement check (0 = disabled). When enabled, runs in all phases
+# (stable LR, WSD cooldown ramp, min_lr tail) once the val-loss buffer fills — independent of
+# early_stop_min_iters, which only gates patience-based early stop.
 # Triggers cooldown (or stop) if val loss has dropped less than `early_stop_window_min_improvement`
 # over the last `early_stop_window_evals` evaluations, even when patience hasn't expired.
 early_stop_window_evals = 0

@@ -1,5 +1,7 @@
 I want to write one (or many) blog posts about this project. So we should keep a running log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-09:** **PR #9 (`claude/v7-early-cooldown-G7tdi`).** **`train.py`**: sliding-window early stop (`early_stop_window_*`) now applies in **all** WSD phases (stable, LR cooldown ramp, `min_lr` tail); only the val-loss history length gates it — **`early_stop_min_iters`** still gates **patience** early stop only. **`train_patzer_v8.py`**: added **`early_stop_window_evals=15`** / **`early_stop_window_min_improvement=0.002`** (aligned with **`train_patzer_v7_cooldown.py`**). Default **`train.py`** comment block updated to match.
+
 - **2026-05-07:** **Root `README.md`** — project overview, doc map (PLAN / PROJECT_LOG / MODELS / CLAUDE / bot README), end-to-end flow diagram, quick start (venv, scrape→prepare, train, eval, `deploy_bot.py`), repo layout sketch; links **`bot/deploy_bot.py`** for Lichess runs.
 
 - **2026-05-06:** **`launch.py` Vast search** — **`--gpu-name`** (e.g. **`RTX_4090`**) narrows offers so **`--limit 10`** isn’t only the globally cheapest GPUs; **`--max-price`** help notes **0.60** may exclude pricey hosts; **`--limit`** help notes default **10** + sort by **`dph_total`** skews to low-end cards unless you raise the limit or filter by GPU.

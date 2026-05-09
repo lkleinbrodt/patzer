@@ -13,6 +13,11 @@
 #
 # Schedule: WSD with auto_cooldown + post-cooldown min_lr tail (implemented in train.py).
 #
+# Early stop semantics (train.py post PR #9):
+# - early_stop_min_iters gates PATIENCE only (consecutive evals without significant improvement).
+# - early_stop_window_* is a sliding-window “stalled progress” trigger active in every phase
+#   (stable, cooldown, min_lr tail) once the val-loss history fills — same knobs as
+#   config/train_patzer_v7_cooldown.py.
 
 out_dir = 'checkpoints/patzer_v8'
 eval_interval = 1000
@@ -24,7 +29,10 @@ log_interval = 100
 always_save_checkpoint = True
 early_stop_patience_evals = 25
 # v5/v6 showed the stable phase can plateau well before 150k; v7 uses 100k.
-early_stop_min_iters = 100000
+early_stop_min_iters = 80000
+# Stop (or start auto_cooldown) if val improves less than this much over any window span — see train.py.
+early_stop_window_evals = 15
+early_stop_window_min_improvement = 0.002
 ckpt_save_interval = 10000
 weights_snapshot_interval = 10000
 ckpt_best_min_delta = 0.001
