@@ -143,6 +143,10 @@ I want to write one (or many) blog posts about this project. So we should keep a
 
 - **`train_patzer_v7.py` — ~306M model (24L / 16H / 1024d).** Replaced the painful ~508M 40L design with GPT-2-medium-style depth/width: **`batch_size=64`**, **`gradient_accumulation_steps=2`** (effective batch 128 × 256 tok/step like v6), **`gradient_checkpointing=False`**, **`learning_rate=4e-4`**, **`max_iters=400000`**, **`warmup_iters=5000`**, **`cooldown_iters=60000`**, **`early_stop_min_iters=100000`**, **`eval_iters=100`** (100×64 = v6’s 6400 seqs/split).
 
+## 2026-05-08
+
+- **v8 scaffolding + data-quality checks.** Added **`patzer/config/train_patzer_v8.py`** for a moderate **~205M** model (**16L/16H/1024d**) targeting **`prepared_min_elo_2250`** with the same WSD+auto-cooldown recipe as v7. Added **`pipeline/opening_quality_checks.py`** to stream `games_*.txt(.gz)` and compare **opening signature diversity**, **draw rate**, **avg plies**, and **Elo summaries** across min-Elo cutoffs (prepare-style: both players ≥ cutoff).
+
 ## 2026-05-06
 
 - Ran cross-dataset eval: `checkpoints/patzer_v6/weights_best.pt` on v5 validation set (`data/prepared/val.bin`). Used `eval/val_loss.py` on MPS (float32), 50 iters, batch 32. Result: mean val loss 1.4640 (std 0.0262). Checkpoint-reported v6 val loss was 1.3960 at iter 217000 (on its own v6 val).
