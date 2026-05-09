@@ -62,6 +62,11 @@ weights_snapshot_interval = 10000
 # Early stopping on val loss (0 = disabled). Counts consecutive evals without val improvement.
 early_stop_patience_evals = 0
 early_stop_min_iters = 0 # require at least this many steps before early stop can trigger
+# Sliding-window rate-of-improvement check (WSD stable phase only, 0 = disabled).
+# Triggers cooldown (or stop) if val loss has dropped less than `early_stop_window_min_improvement`
+# over the last `early_stop_window_evals` evaluations, even when patience hasn't expired.
+early_stop_window_evals = 0
+early_stop_window_min_improvement = 0.005
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = False # disabled by default
@@ -196,6 +201,8 @@ def get_batch(split):
 iter_num = 0
 best_val_loss = 1e9
 evals_without_improvement = 0
+_val_loss_history: list = []  # full per-eval history; window check reads the tail
+_window_trigger: bool = False
 
 meta_path = os.path.join(data_dir, 'meta.json')
 meta_vocab_size = None
@@ -275,6 +282,7 @@ elif init_from == 'resume':
     # to whatever was saved (handles auto_cooldown triggering on a previous run).
     if cooldown_start_iter is None:
         cooldown_start_iter = checkpoint.get('cooldown_start_iter', None)
+    _val_loss_history = list(checkpoint.get('val_loss_history', []))
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -465,6 +473,17 @@ while True:
             else:
                 evals_without_improvement += 1
 
+        _val_loss_history.append(val_loss)
+        # Sliding-window rate check: fire if val has barely moved over the last N evals.
+        # Active in all phases (stable, cooldown, min_lr tail). Natural gate: len check means
+        # the window must fill before it can fire (~N*eval_interval iters of warmup).
+        _window_trigger = False
+        if (early_stop_window_evals > 0
+                and len(_val_loss_history) >= early_stop_window_evals):
+            window_improvement = _val_loss_history[-early_stop_window_evals] - val_loss
+            if window_improvement < early_stop_window_min_improvement:
+                _window_trigger = True
+
         # One-time patience reset when WSD cooldown completes. Gives the post-cooldown
         # min_lr tail a fresh patience window so training doesn't terminate immediately
         # if val happened to plateau at the end of cooldown.
@@ -506,6 +525,7 @@ while True:
                     'cooldown_start_iter': cooldown_start_iter,
                     'config': config,
                     'wandb_run_id': wandb_run_id,
+                    'val_loss_history': _val_loss_history[-max(early_stop_window_evals, 100):],
                 }
                 if save_latest:
                     print(f"saving checkpoint to {out_dir}")
@@ -553,6 +573,10 @@ while True:
         sync = torch.tensor([evals_without_improvement], dtype=torch.int, device=device)
         broadcast(sync, src=0)
         evals_without_improvement = int(sync.item())
+        if early_stop_window_evals > 0:
+            wt_sync = torch.tensor([int(_window_trigger)], dtype=torch.int, device=device)
+            broadcast(wt_sync, src=0)
+            _window_trigger = bool(wt_sync.item())
     if iter_num == 0 and eval_only:
         break
 
@@ -625,6 +649,27 @@ while True:
                 print(
                     f"early stop: val loss did not improve for {early_stop_patience_evals} evals "
                     f"(eval_interval={eval_interval}), at iter {iter_num}"
+                )
+            break
+    if _window_trigger:
+        if auto_cooldown and lr_schedule == 'wsd' and cooldown_start_iter is None:
+            cooldown_start_iter = iter_num
+            _patience_tail = max(early_stop_patience_evals + 5, 30) * eval_interval
+            max_iters = iter_num + cooldown_iters + _patience_tail
+            evals_without_improvement = 0
+            if master_process:
+                window_improvement = _val_loss_history[-early_stop_window_evals] - _val_loss_history[-1]
+                print(
+                    f"[wsd] window trigger: only {window_improvement:.4f} drop over last "
+                    f"{early_stop_window_evals} evals at iter {iter_num}; "
+                    f"starting cooldown ({cooldown_iters} iters) + min_lr tail, hard cap at iter {max_iters}"
+                )
+        else:
+            if master_process:
+                window_improvement = _val_loss_history[-early_stop_window_evals] - _val_loss_history[-1]
+                print(
+                    f"early stop (slow window): only {window_improvement:.4f} drop over last "
+                    f"{early_stop_window_evals} evals at iter {iter_num}"
                 )
             break
 
