@@ -1,5 +1,7 @@
 I want to write one (or many) blog posts about this project. So we should keep a running log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-10:** **`launch.py` GPU allowlist + refresh.** Vast pricing varies wildly second-to-second, so the search now defaults to a curated **`DESIRED_GPUS`** allowlist (3060–3090, 4080, 4090, A4000/5000/6000, L4/L40, A100, H100) to avoid fringe cards like the 4070S Ti. Fetches 50 offers from Vast (was 10), then client-side filters and groups by GPU model showing the **best 2 per model** (configurable via `--per-gpu N`) so you can see price variance within each tier. Added `r` at the interactive prompt to **refresh prices** without re-running the command. Use `--all-gpus` to bypass the allowlist.
+
 - **2026-05-09:** **`launch.py` / `estimate_vast_bandwidth.py`** — default **`--mins-per-1k-steps`** set to **10** (was 7) for bandwidth / all-in $/hr estimates.
 
 - **2026-05-09:** **Resume patzer v8 on a new Vast instance.** Use **`python launch.py train --config train_patzer_v8 --resume`** from repo root (requires **`checkpoints/patzer_v8/ckpt.pt`** on R2; **`train.py`** pulls **`data/prepared_min_elo_2250/`** on first start if missing). Optional **`--wandb-run-id=<id>`** continues the same W&B run.

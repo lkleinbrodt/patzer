@@ -254,6 +254,29 @@ trap _on_exit EXIT"""
     ]))
 
 
+def _match_desired_gpu(gpu_name: str, allowlist: list[str] = DESIRED_GPUS) -> bool:
+    """Return True if `gpu_name` contains any entry from the allowlist (case-insensitive)."""
+    name = gpu_name.upper()
+    return any(pattern.upper() in name for pattern in allowlist)
+
+
+def _group_best_per_gpu(offers: list[dict], per_gpu: int) -> list[dict]:
+    """
+    Deduplicate to at most `per_gpu` offers per GPU model (sorted by all-in cost),
+    then re-sort the combined list by all-in cost so the cheapest overall is #1.
+    """
+    from collections import defaultdict
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for o in offers:
+        groups[o.get("gpu_name", "unknown")].append(o)
+    result = []
+    for group in groups.values():
+        group.sort(key=lambda x: (x.get("_all_in_dph", float("inf")), x.get("dph_total", float("inf"))))
+        result.extend(group[:per_gpu])
+    result.sort(key=lambda x: (x.get("_all_in_dph", float("inf")), x.get("dph_total", float("inf"))))
+    return result
+
+
 def print_offers(offers):
     def fmt_money(x: float | None, width: int = 7) -> str:
         if x is None:
@@ -663,19 +686,7 @@ def cmd_train(args: argparse.Namespace) -> None:
     if args.interruptible:
         search_args.append("--interruptible")
 
-    print(f"Searching: {query}")
-    offers = vast(*search_args)
-
-    if not offers:
-        print(
-            "No offers found. Try --max-price, --min-gpu-ram, "
-            "--max-price / --gpu-name, "
-            "or --max-inet-up-cost 0 --max-inet-down-cost 0 for free bandwidth only, "
-            "or --search-only to explore.",
-        )
-        sys.exit(1)
-
-    # Add an "all-in" $/hr estimate that includes expected bandwidth costs.
+    # Bandwidth cost is computed once; only the Vast API call + display repeats on refresh.
     up_gb_per_hr, down_gb_per_hr, bw_meta = _estimate_bandwidth_gb_per_hr(
         config_name=args.config,
         mins_per_1k_steps=args.mins_per_1k_steps,
@@ -707,40 +718,68 @@ def cmd_train(args: argparse.Namespace) -> None:
         f"\n  download: {down_gb_per_hr:.3f} GB/hr  (training_data_gb={args.training_data_gb} "
         f"amortized over {args.amortize_download_over_hours} hr — one-time dataset pull)"
     )
-
-    for o in offers:
-        o["_all_in_dph"] = _offer_all_in_dph(
-            o,
-            up_gb_per_hr=up_gb_per_hr,
-            down_gb_per_hr=down_gb_per_hr,
+    if not args.all_gpus:
+        print(
+            f"  GPU filter: {', '.join(DESIRED_GPUS)}  (use --all-gpus to disable)"
         )
-    offers.sort(key=lambda x: (x.get("_all_in_dph", float("inf")), x.get("dph_total", float("inf"))))
+
+    def _fetch_and_rank() -> list[dict]:
+        print(f"\nSearching: {query}")
+        raw = vast(*search_args)
+        if not raw:
+            return []
+        for o in raw:
+            o["_all_in_dph"] = _offer_all_in_dph(
+                o, up_gb_per_hr=up_gb_per_hr, down_gb_per_hr=down_gb_per_hr
+            )
+        raw.sort(key=lambda x: (x.get("_all_in_dph", float("inf")), x.get("dph_total", float("inf"))))
+        if not args.all_gpus:
+            raw = [o for o in raw if _match_desired_gpu(o.get("gpu_name", ""))]
+        return _group_best_per_gpu(raw, args.per_gpu)
+
+    offers = _fetch_and_rank()
+
+    if not offers:
+        print(
+            "No offers found matching the GPU allowlist. Try --all-gpus, --max-price, "
+            "--min-gpu-ram, or --search-only to explore.",
+        )
+        sys.exit(1)
 
     print_offers(offers)
 
     if args.search_only:
         return
 
-    best = offers[0]
-    print(
-        f"\nDefault: #{1} — {best['gpu_name']} "
-        f"@ base ${best['dph_total']:.3f}/hr, all-in ${best.get('_all_in_dph', best['dph_total']):.3f}/hr "
-        f"(id={best['id']})"
-    )
-    print("Press Enter to use it, type a number to pick a different one, or Ctrl-C to abort.")
-    try:
-        choice = input("> ").strip()
-    except KeyboardInterrupt:
-        print("\nAborted.")
-        sys.exit(0)
+    offer = None
+    while offer is None:
+        best = offers[0]
+        print(
+            f"\nDefault: #{1} — {best['gpu_name']} "
+            f"@ base ${best['dph_total']:.3f}/hr, all-in ${best.get('_all_in_dph', best['dph_total']):.3f}/hr "
+            f"(id={best['id']})"
+        )
+        print("Press Enter to use it, type a number to pick, 'r' to refresh prices, or Ctrl-C to abort.")
+        try:
+            choice = input("> ").strip().lower()
+        except KeyboardInterrupt:
+            print("\nAborted.")
+            sys.exit(0)
 
-    if choice == "":
-        offer = best
-    elif choice.isdigit() and 1 <= int(choice) <= len(offers):
-        offer = offers[int(choice) - 1]
-    else:
-        print("Invalid choice. Aborted.")
-        sys.exit(1)
+        if choice == "r":
+            offers = _fetch_and_rank()
+            if not offers:
+                print("No offers found after refresh.")
+                sys.exit(1)
+            print_offers(offers)
+            continue
+        elif choice == "":
+            offer = best
+        elif choice.isdigit() and 1 <= int(choice) <= len(offers):
+            offer = offers[int(choice) - 1]
+        else:
+            print("Invalid choice. Aborted.")
+            sys.exit(1)
 
     print(f"\nLaunching: {offer['gpu_name']} (id={offer['id']}) "
           f"@ ${offer['dph_total']:.3f}/hr  |  config: {args.config}"
@@ -941,13 +980,31 @@ def main():
     train_p.add_argument("--search-only", action="store_true",
                          help="Print available offers and exit")
     train_p.add_argument(
+        "--all-gpus",
+        action="store_true",
+        help=(
+            "Show all GPU models instead of the curated allowlist "
+            f"({', '.join(DESIRED_GPUS)}). "
+            "Useful for exploring fringe options."
+        ),
+    )
+    train_p.add_argument(
+        "--per-gpu",
+        type=int,
+        default=2,
+        metavar="N",
+        help=(
+            "Max offers to show per GPU model (default: %(default)s). "
+            "Shows price variance within each GPU tier. Set to 1 for a compact view."
+        ),
+    )
+    train_p.add_argument(
         "--limit",
         type=int,
-        default=10,
+        default=50,
         help=(
-            "Max offers fetched from Vast (sorted ascending by base $/hr). "
-            "Default 10 is almost always cheap low-end GPUs; use a larger limit or "
-            "--gpu-name RTX_4090 to surface specific models."
+            "Max offers fetched from Vast API before client-side GPU filtering (default: %(default)s). "
+            "Increase if GPU allowlist filtering leaves too few results."
         ),
     )
     train_p.add_argument("--interruptible", "-i", action="store_true",
