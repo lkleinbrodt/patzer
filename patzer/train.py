@@ -655,10 +655,14 @@ while True:
             break
     if _window_trigger:
         if auto_cooldown and lr_schedule == 'wsd' and cooldown_start_iter is None:
+            # Stable phase stalled → kick into cooldown and reset everything.
+            # Clear the trigger so the next iteration doesn't see it as still-active
+            # and immediately fall into the else-terminate branch.
             cooldown_start_iter = iter_num
             _patience_tail = max(early_stop_patience_evals + 5, 30) * eval_interval
             max_iters = iter_num + cooldown_iters + _patience_tail
             evals_without_improvement = 0
+            _window_trigger = False
             if master_process:
                 window_improvement = _val_loss_history[-early_stop_window_evals] - _val_loss_history[-1]
                 print(
@@ -667,6 +671,7 @@ while True:
                     f"starting cooldown ({cooldown_iters} iters) + min_lr tail, hard cap at iter {max_iters}"
                 )
         else:
+            # Cooldown or min_lr tail is already active — stagnation here means stop.
             if master_process:
                 window_improvement = _val_loss_history[-early_stop_window_evals] - _val_loss_history[-1]
                 print(

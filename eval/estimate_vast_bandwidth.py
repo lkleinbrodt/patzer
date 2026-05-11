@@ -2,13 +2,18 @@
 Estimate checkpoint improvement rate (new best val loss) from a W&B CSV export,
 and convert it into an expected bandwidth egress rate for Vast offer selection.
 
+Uses the same upload model as ``launch.py`` (see ``train.py``): ``ckpt.pt`` at
+``ckpt_save_interval`` steps, ``weights_best.pt`` R2 uploads capped by cooldown.
+
 Usage:
-  python eval/estimate_vast_bandwidth.py /path/to/wandb_export.csv \
-      --ckpt-gb 0.5 --mins-per-1k-steps 7 --eval-interval-steps 1000
+  python eval/estimate_vast_bandwidth.py /path/to/wandb_export.csv \\
+      --full-ckpt-gb 2.5 --weights-gb 1.0 --ckpt-save-interval 10000 \\
+      --cooldown-steps 2500 --mins-per-1k-steps 10 --eval-interval-steps 1000
 
 Notes:
 - Assumes CSV rows are in chronological order.
 - Counts "improvement" when val/loss is strictly less than the best so far.
+- Does not model ckpt_best_min_delta (R2 may upload slightly less often).
 """
 
 from __future__ import annotations
@@ -43,8 +48,8 @@ def main() -> None:
     ap.add_argument(
         "--mins-per-1k-steps",
         type=float,
-        default=7.0,
-        help="Training speed in minutes per 1000 steps (default: 7)",
+        default=10.0,
+        help="Training speed in minutes per 1000 steps (default: %(default)s)",
     )
     ap.add_argument(
         "--eval-interval-steps",
@@ -53,20 +58,32 @@ def main() -> None:
         help="Eval interval in steps (default: 1000)",
     )
     ap.add_argument(
-        "--ckpt-gb",
+        "--full-ckpt-gb",
         type=float,
-        default=0.5,
-        help="Checkpoint size in GB (default: 0.5)",
+        default=2.5,
+        dest="full_ckpt_gb",
+        help="Full ckpt.pt size in GB (default: 2.5)",
     )
     ap.add_argument(
-        "--extra-saves-per-eval",
+        "--weights-gb",
         type=float,
         default=1.0,
-        help=(
-            "Extra saves per eval besides the always-save checkpoint. "
-            "If you save best checkpoints, this is approximately the 'improvement rate'. "
-            "Leave at 1.0 to estimate '1 (always) + improve_rate'."
-        ),
+        dest="weights_gb",
+        help="weights_best.pt size in GB (default: 1.0)",
+    )
+    ap.add_argument(
+        "--ckpt-save-interval",
+        type=int,
+        default=10000,
+        dest="ckpt_save_interval",
+        help="train.py ckpt_save_interval; 0 = save full ckpt every eval (default: 10000)",
+    )
+    ap.add_argument(
+        "--cooldown-steps",
+        type=int,
+        default=2500,
+        dest="cooldown_steps",
+        help="train.py ckpt_best_cooldown_steps; 0 = no cooldown (default: 2500)",
     )
     args = ap.parse_args()
 
@@ -74,8 +91,14 @@ def main() -> None:
         raise SystemExit("--mins-per-1k-steps must be > 0")
     if args.eval_interval_steps <= 0:
         raise SystemExit("--eval-interval-steps must be > 0")
-    if args.ckpt_gb < 0:
-        raise SystemExit("--ckpt-gb must be >= 0")
+    if args.full_ckpt_gb < 0:
+        raise SystemExit("--full-ckpt-gb must be >= 0")
+    if args.weights_gb < 0:
+        raise SystemExit("--weights-gb must be >= 0")
+    if args.ckpt_save_interval < 0:
+        raise SystemExit("--ckpt-save-interval must be >= 0")
+    if args.cooldown_steps < 0:
+        raise SystemExit("--cooldown-steps must be >= 0")
 
     with args.csv_path.open("r", newline="") as f:
         r = csv.DictReader(f)
@@ -115,11 +138,20 @@ def main() -> None:
     steps_per_hr = 60.0 * 1000.0 / args.mins_per_1k_steps
     evals_per_hr = steps_per_hr / float(args.eval_interval_steps)
 
-    # Expected saves/hr: always_save_checkpoint=True means one per eval;
-    # plus best checkpoint on improvement, approximated as improve_rate per eval.
-    saves_per_eval = 1.0 + improve_rate * float(args.extra_saves_per_eval)
-    saves_per_hr = evals_per_hr * saves_per_eval
-    up_gb_per_hr = saves_per_hr * args.ckpt_gb
+    if args.ckpt_save_interval == 0:
+        full_per_hr = args.full_ckpt_gb * evals_per_hr
+    else:
+        full_per_hr = args.full_ckpt_gb * steps_per_hr / float(args.ckpt_save_interval)
+
+    raw_u = improve_rate * evals_per_hr
+    if args.cooldown_steps > 0:
+        cap = steps_per_hr / float(args.cooldown_steps)
+        weight_u_per_hr = min(raw_u, cap)
+    else:
+        weight_u_per_hr = raw_u
+
+    weights_per_hr = args.weights_gb * weight_u_per_hr
+    up_gb_per_hr = full_per_hr + weights_per_hr
 
     print(f"CSV: {args.csv_path}")
     print(f"Columns: step={step_col!r}, val={val_col!r}")
@@ -130,13 +162,14 @@ def main() -> None:
     print()
     print(f"Speed:             {args.mins_per_1k_steps:.2f} min / 1k steps  ({steps_per_hr:.0f} steps/hr)")
     print(f"Eval interval:      {args.eval_interval_steps} steps  ({evals_per_hr:.2f} evals/hr)")
-    print(f"Checkpoint size:    {args.ckpt_gb:.3f} GB")
-    print(f"Expected saves/eval {saves_per_eval:.3f}  (1 always + {improve_rate:.3f} improvement)")
+    print(f"ckpt_save_interval: {args.ckpt_save_interval}")
+    print(f"cooldown_steps:     {args.cooldown_steps}")
     print()
-    print(f"Estimated upload:   {up_gb_per_hr:.3f} GB/hr")
+    print(f"ckpt.pt:            {full_per_hr:.3f} GB/hr")
+    print(f"weights_best R2:    {weights_per_hr:.3f} GB/hr  (min raw vs cooldown cap)")
+    print(f"Total upload:       {up_gb_per_hr:.3f} GB/hr")
     print("Use with launch.py: --up-gb-per-hr {:.3f}".format(up_gb_per_hr))
 
 
 if __name__ == "__main__":
     main()
-

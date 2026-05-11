@@ -1,5 +1,15 @@
 I want to write one (or many) blog posts about this project. So we should keep a running log here of everything we do to make it easy to remember. Basically any time we do something meaningful or interesting, we shoud write a short note here. (for example, making the model better, expanding training data, fixing a pesky bug, changing our eval system, etc.)
 
+- **2026-05-09:** **`launch.py` / `estimate_vast_bandwidth.py`** — default **`--mins-per-1k-steps`** set to **10** (was 7) for bandwidth / all-in $/hr estimates.
+
+- **2026-05-09:** **Resume patzer v8 on a new Vast instance.** Use **`python launch.py train --config train_patzer_v8 --resume`** from repo root (requires **`checkpoints/patzer_v8/ckpt.pt`** on R2; **`train.py`** pulls **`data/prepared_min_elo_2250/`** on first start if missing). Optional **`--wandb-run-id=<id>`** continues the same W&B run.
+
+- **2026-05-09:** **`launch.py` Vast search — default `compute_cap<=900`** so rented GPUs match **PyTorch 2.5.x + cu12.4** wheel archs (through **sm_90**) and **Blackwell sm_120** hosts (~1200) are skipped (avoids “CUDA capability sm_120 is not compatible” on RTX 50‑series). Override with **`--max-compute-cap 0`** when using an upgraded training image / PyTorch with sm_120.
+
+- **2026-05-09:** **`launch.py` bandwidth estimates** — **`--training-data-gb 5`**; **`--full-ckpt-gb` / `--weights-gb`** with upload math aligned to **`train.py`**: **`ckpt.pt`** at **`ckpt_save_interval`** steps (not every eval), **`weights_best`** R2 capped by **`ckpt_best_cooldown_steps`** vs improvement rate (ignores **`ckpt_best_min_delta`** — slightly conservative). Download amortized **`--amortize-download-over-hours`** default **24** (~day-scale runs). **`eval/estimate_vast_bandwidth.py`** matches (`--ckpt-save-interval`, `--cooldown-steps`).
+
+- **2026-05-09:** **`launch.py` Vast search — bandwidth filters off by default:** **`--max-inet-up-cost`** / **`--max-inet-down-cost`** default **`-1`**. Use **`0`** for free upload/download only.
+
 - **2026-05-09:** **PR #9 (`claude/v7-early-cooldown-G7tdi`).** **`train.py`**: sliding-window early stop (`early_stop_window_*`) now applies in **all** WSD phases (stable, LR cooldown ramp, `min_lr` tail); only the val-loss history length gates it — **`early_stop_min_iters`** still gates **patience** early stop only. **`train_patzer_v8.py`**: added **`early_stop_window_evals=15`** / **`early_stop_window_min_improvement=0.002`** (aligned with **`train_patzer_v7_cooldown.py`**). Default **`train.py`** comment block updated to match.
 
 - **2026-05-07:** **Root `README.md`** — project overview, doc map (PLAN / PROJECT_LOG / MODELS / CLAUDE / bot README), end-to-end flow diagram, quick start (venv, scrape→prepare, train, eval, `deploy_bot.py`), repo layout sketch; links **`bot/deploy_bot.py`** for Lichess runs.
@@ -144,6 +154,12 @@ I want to write one (or many) blog posts about this project. So we should keep a
 - **`bot/configs` — lichess-bot configs for Patzer v5 + v6.** Added **`patzer_v5.yml`** / **`patzer_v6.yml`**, mirroring **`patzer_v4.yml`** (same homemade engine options / challenge / matchmaking knobs) while pointing **`homemade_options.patzer_checkpoint`** at **`checkpoints/patzer_v5/weights_best.pt`** / **`checkpoints/patzer_v6/weights_best.pt`** and updating greetings.
 
 - **`train_patzer_v7.py` — ~306M model (24L / 16H / 1024d).** Replaced the painful ~508M 40L design with GPT-2-medium-style depth/width: **`batch_size=64`**, **`gradient_accumulation_steps=2`** (effective batch 128 × 256 tok/step like v6), **`gradient_checkpointing=False`**, **`learning_rate=4e-4`**, **`max_iters=400000`**, **`warmup_iters=5000`**, **`cooldown_iters=60000`**, **`early_stop_min_iters=100000`**, **`eval_iters=100`** (100×64 = v6’s 6400 seqs/split).
+
+## 2026-05-10
+
+- **Bug fix: window trigger double-fire killed v8 mid-cooldown.** The WSD window trigger (`early_stop_window_evals`) correctly detected the stable phase had stalled and started the 60k-iter cooldown — but `_window_trigger` was never cleared after doing so. The next iteration saw the flag still `True`, found `cooldown_start_iter is not None`, fell into the else-terminate branch, and killed the run immediately. Fixed by adding `_window_trigger = False` after successfully starting cooldown in `patzer/train.py`.
+
+- **`train_patzer_v8_cooldown.py` — resume v8 directly into cooldown.** Created `patzer/config/train_patzer_v8_cooldown.py`: `init_from=resume`, `cooldown_start_iter=112000` (forces cooldown from the first step), `early_stop_window_evals=0` (disabled so the stale plateau history from the stable phase doesn't fire the window trigger again on the first eval), patience-based stopping (`early_stop_patience_evals=25`) active during cooldown and min_lr tail. `auto_cooldown=True` kept so the post-cooldown patience reset fires when entering the min_lr tail. Launch: `python launch.py train --config train_patzer_v8_cooldown --resume`.
 
 ## 2026-05-08
 
