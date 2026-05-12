@@ -1,0 +1,107 @@
+# Patzer v8 — use LICHESS_BOT_TOKEN in the environment (recommended) or token below.
+# Override locally: copy to patzer_v8.local.yml (gitignored).
+
+token: ""
+url: "https://lichess.org/"
+quit_after_all_games_finish: true
+
+engine:
+  dir: "."
+  name: "PatzerEngine"
+  protocol: "homemade"
+  ponder: false
+  polyglot:
+    enabled: false
+    book:
+      standard: []
+    min_weight: 1
+    selection: "weighted_random"
+    max_depth: 20
+    normalization: "none"
+  draw_or_resign:
+    resign_enabled: false
+    resign_score: -1000
+    resign_for_egtb_minus_two: true
+    resign_moves: 3
+    offer_draw_enabled: true
+    offer_draw_score: 0
+    offer_draw_for_egtb_zero: true
+    offer_draw_moves: 10
+    offer_draw_pieces: 10
+  online_moves:
+    max_out_of_book_moves: 10
+    max_retries: 2
+    chessdb_book:
+      enabled: false
+    lichess_cloud_analysis:
+      enabled: false
+    lichess_opening_explorer:
+      enabled: false
+    online_egtb:
+      enabled: false
+  lichess_bot_tbs:
+    syzygy:
+      enabled: false
+      paths: []
+    gaviota:
+      enabled: false
+      paths: []
+  homemade_options:
+    patzer_checkpoint: "checkpoints/patzer_v8/weights_best.pt"
+    device: "auto"
+    temperature: 0
+    conditioning: "match_color"
+    min_think_ms: 50
+    think_jitter_ms: 50
+
+challenge:
+  concurrency: 1
+  sort_by: "best"
+  preference: "none"
+  accept_bot: true
+  only_bot: false
+  max_increment: 20
+  min_increment: 0
+  max_base: 1800
+  min_base: 0
+  max_days: 14
+  min_days: 1
+  variants:
+    - standard
+  time_controls:
+    - bullet
+    - blitz
+    - rapid
+  modes:
+    - rated
+  bullet_requires_increment: false
+  max_simultaneous_games_per_user: 5
+
+correspondence:
+  move_time: 60
+  checkin_period: 300
+  disconnect_time: 150
+  ponder: false
+
+matchmaking:
+  allow_matchmaking: true
+  allow_during_games: true
+  challenge_variant: "standard"
+  challenge_timeout: 0
+  challenge_initial_time:
+    - 60
+    - 120
+    - 180
+  challenge_increment:
+    - 0
+    - 1
+    - 2
+  opponent_max_rating: 2400
+  rating_preference: "none"
+  challenge_mode: "rated"
+  challenge_filter: fine
+  include_challenge_block_list: false
+
+greeting:
+  hello: "Hi! I'm Patzer v8, I don't know the rules of chess but I've watched a lot of games."
+  goodbye: "Good game!"
